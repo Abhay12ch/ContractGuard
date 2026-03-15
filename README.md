@@ -42,7 +42,7 @@ AI-powered contract analysis system for summaries, risky clause detection, contr
 ## 2. Project Structure
 
 ```text
-GDG/
+ContractGuard/
 ├── ContractGuard_Hackathon_Brief.pdf   # Hackathon problem statement
 ├── README.md                           # Roadmap and structure (this file)
 ├── requirements.txt                    # Python dependencies
