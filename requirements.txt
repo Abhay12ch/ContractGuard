@@ -1,0 +1,12 @@
+fastapi
+uvicorn
+langchain
+langchain-text-splitters
+faiss-cpu
+sentence-transformers
+pypdf
+python-docx
+python-multipart
+google-generativeai
+python-dotenv
+streamlit

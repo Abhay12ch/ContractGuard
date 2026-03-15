@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Environment & secrets
+.env
+.env.*
+*.key
+*.pem
+
+# OS / Editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Logs
+*.log
+
+# Streamlit
+.streamlit/
+
+# FAISS / embeddings / cache
+*.faiss
+*.pkl
+cache/
+
+# Node / frontend (if added later)
+node_modules/
+.dist/
+.build/
