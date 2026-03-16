@@ -8,7 +8,10 @@ from typing import Any, Dict, List
 import re
 
 import numpy as np
-from langchain_text_splitters import RecursiveCharacterTextSplitter
+try:
+    from langchain_text_splitters import RecursiveCharacterTextSplitter
+except Exception:
+    RecursiveCharacterTextSplitter = None  # type: ignore
 
 try:
     import faiss  # type: ignore
@@ -37,13 +40,34 @@ def chunk_contract_text(
     if not text or not text.strip():
         return []
 
-    splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        separators=["\n\n", "\n", ". ", " ", ""],
-    )
-    chunks = splitter.split_text(text)
-    return [chunk.strip() for chunk in chunks if chunk.strip()]
+    if RecursiveCharacterTextSplitter is not None:
+        splitter = RecursiveCharacterTextSplitter(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            separators=["\n\n", "\n", ". ", " ", ""],
+        )
+        chunks = splitter.split_text(text)
+        return [chunk.strip() for chunk in chunks if chunk.strip()]
+
+    # Lightweight local fallback when langchain-text-splitters is unavailable.
+    clean_text = re.sub(r"\s+", " ", text).strip()
+    if not clean_text:
+        return []
+
+    chunks: List[str] = []
+    step = max(1, chunk_size - chunk_overlap)
+    start = 0
+    text_len = len(clean_text)
+    while start < text_len:
+        end = min(start + chunk_size, text_len)
+        chunk = clean_text[start:end].strip()
+        if chunk:
+            chunks.append(chunk)
+        if end >= text_len:
+            break
+        start += step
+
+    return chunks
 
 
 def _get_embedder(model_name: str = "all-MiniLM-L6-v2") -> Any:

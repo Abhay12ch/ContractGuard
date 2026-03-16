@@ -1,6 +1,5 @@
 fastapi
 uvicorn
-langchain-text-splitters
 numpy
 pypdf
 python-docx
