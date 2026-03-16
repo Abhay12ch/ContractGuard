@@ -1,12 +1,34 @@
 """Streamlit UI for ContractGuard AI demo flow."""
 
 import os
+from urllib.parse import urlparse
 import requests
 import streamlit as st
 
 
-API_BASE_URL = os.getenv("API_BASE_URL", "http://127.0.0.1:8000")
 RUNNING_ON_RENDER = os.getenv("RENDER", "").lower() == "true"
+
+
+def _normalize_api_base_url() -> str:
+    """Normalize configured API base URL and apply safe Render fallback."""
+    configured = os.getenv("API_BASE_URL", "").strip().rstrip("/")
+
+    if configured:
+        parsed = urlparse(configured)
+        if parsed.scheme in {"http", "https"} and parsed.netloc:
+            return configured
+
+        # Common misconfiguration: host without scheme.
+        if not parsed.scheme and parsed.path and "." in parsed.path:
+            return f"https://{parsed.path}"
+
+    if RUNNING_ON_RENDER:
+        return "https://contractguard-backend.onrender.com"
+
+    return "http://127.0.0.1:8000"
+
+
+API_BASE_URL = _normalize_api_base_url()
 
 
 def _init_state() -> None:
@@ -23,16 +45,22 @@ def _init_state() -> None:
 
 
 def _api_post(path: str, **kwargs):
+    parsed = urlparse(API_BASE_URL)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(
+            "Invalid API_BASE_URL configuration. Set API_BASE_URL to a full URL, "
+            "for example: https://contractguard-backend.onrender.com"
+        )
     return requests.post(f"{API_BASE_URL}{path}", timeout=90, **kwargs)
 
 
 st.set_page_config(page_title="ContractGuard AI", layout="wide")
 _init_state()
 
-if RUNNING_ON_RENDER and API_BASE_URL.startswith("http://127.0.0.1"):
+if RUNNING_ON_RENDER and "onrender.com" not in API_BASE_URL:
     st.error(
-        "API_BASE_URL is not configured. Set it in Render frontend environment "
-        "variables to your backend URL (for example, https://your-backend.onrender.com)."
+        "API_BASE_URL looks invalid. Set it in Render frontend environment "
+        "variables to your backend URL (for example, https://contractguard-backend.onrender.com)."
     )
 
 # 1) Header
@@ -86,7 +114,7 @@ if process_file_clicked:
                 st.session_state.summary_data = summary_resp.json()
 
                 st.success("Analysis complete.")
-            except requests.RequestException as exc:
+            except (requests.RequestException, RuntimeError) as exc:
                 st.error(f"API error: {exc}")
 
 if process_text_clicked:
@@ -115,7 +143,7 @@ if process_text_clicked:
                 st.session_state.summary_data = summary_resp.json()
 
                 st.success("Text analysis complete.")
-            except requests.RequestException as exc:
+            except (requests.RequestException, RuntimeError) as exc:
                 st.error(f"API error: {exc}")
 
 if st.session_state.contract_id:
@@ -181,7 +209,7 @@ if st.session_state.risk_data and st.session_state.summary_data:
                     qa_json = qa_resp.json()
                     st.session_state.qa_answer = qa_json.get("answer", "No answer generated.")
                     st.write(f"Retrieved Chunks: **{qa_json.get('retrieved_chunks_count', 0)}**")
-                except requests.RequestException as exc:
+                except (requests.RequestException, RuntimeError) as exc:
                     st.error(f"Q&A error: {exc}")
 
     if st.session_state.qa_answer:
