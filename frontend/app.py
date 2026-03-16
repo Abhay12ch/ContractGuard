@@ -7,6 +7,7 @@ import streamlit as st
 
 
 RUNNING_ON_RENDER = os.getenv("RENDER", "").lower() == "true"
+DEFAULT_RENDER_BACKEND_URL = "https://contractguard-backend.onrender.com"
 
 
 def _normalize_api_base_url() -> str:
@@ -18,12 +19,14 @@ def _normalize_api_base_url() -> str:
         if parsed.scheme in {"http", "https"} and parsed.netloc:
             return configured
 
-        # Common misconfiguration: host without scheme.
-        if not parsed.scheme and parsed.path and "." in parsed.path:
-            return f"https://{parsed.path}"
+        # Common misconfiguration: host without scheme. Accept only host-like values.
+        if not parsed.scheme and parsed.path:
+            host_candidate = parsed.path.strip("/")
+            if "." in host_candidate:
+                return f"https://{host_candidate}"
 
     if RUNNING_ON_RENDER:
-        return "https://contractguard-backend.onrender.com"
+        return DEFAULT_RENDER_BACKEND_URL
 
     return "http://127.0.0.1:8000"
 
@@ -46,12 +49,19 @@ def _init_state() -> None:
 
 def _api_post(path: str, **kwargs):
     parsed = urlparse(API_BASE_URL)
+    base_url = API_BASE_URL
+
+    # Final runtime safety-net for any malformed env at deployment/runtime.
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise RuntimeError(
-            "Invalid API_BASE_URL configuration. Set API_BASE_URL to a full URL, "
-            "for example: https://contractguard-backend.onrender.com"
-        )
-    return requests.post(f"{API_BASE_URL}{path}", timeout=90, **kwargs)
+        if RUNNING_ON_RENDER:
+            base_url = DEFAULT_RENDER_BACKEND_URL
+        else:
+            raise RuntimeError(
+                "Invalid API_BASE_URL configuration. Set API_BASE_URL to a full URL, "
+                "for example: https://contractguard-backend.onrender.com"
+            )
+
+    return requests.post(f"{base_url}{path}", timeout=90, **kwargs)
 
 
 st.set_page_config(page_title="ContractGuard AI", layout="wide")
