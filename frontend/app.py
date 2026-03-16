@@ -13,6 +13,7 @@ import streamlit as st
 
 RUNNING_ON_RENDER = os.getenv("RENDER", "").lower() == "true"
 DEFAULT_RENDER_BACKEND_URL = "https://contractguard-backend.onrender.com"
+PREFER_LOCAL_ON_RENDER = os.getenv("PREFER_LOCAL_ON_RENDER", "true").lower() == "true"
 
 LOCAL_MODE_AVAILABLE = False
 LOCAL_MODE_IMPORT_ERROR = ""
@@ -205,6 +206,10 @@ def _local_post(path: str, **kwargs) -> _LocalResponse:
 
 
 def _api_post(path: str, **kwargs):
+    # Local-first mode avoids long blocking waits when the backend service is cold/unavailable.
+    if RUNNING_ON_RENDER and PREFER_LOCAL_ON_RENDER and LOCAL_MODE_AVAILABLE:
+        return _local_post(path, **kwargs)
+
     parsed = urlparse(API_BASE_URL)
     base_url = API_BASE_URL
 
@@ -263,7 +268,8 @@ st.title("ContractGuard AI")
 st.caption("Upload a contract, get a safety score, summary, clause risks, and instant Q&A")
 st.caption(f"Backend endpoint: {API_BASE_URL}")
 if LOCAL_MODE_AVAILABLE:
-    st.caption("Fallback mode: enabled (local processing if backend is unavailable)")
+    mode = "Local-first" if (RUNNING_ON_RENDER and PREFER_LOCAL_ON_RENDER) else "Fallback"
+    st.caption(f"Processing mode: {mode} (local processing available)")
 
 # 2) Upload Contract Section
 st.subheader("Upload Contract")
