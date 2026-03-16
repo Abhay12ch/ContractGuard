@@ -1,9 +1,7 @@
 fastapi
 uvicorn
-langchain
 langchain-text-splitters
-faiss-cpu
-sentence-transformers
+numpy
 pypdf
 python-docx
 python-multipart
