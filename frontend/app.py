@@ -53,13 +53,7 @@ def _api_post(path: str, **kwargs):
 
     # Final runtime safety-net for any malformed env at deployment/runtime.
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        if RUNNING_ON_RENDER:
-            base_url = DEFAULT_RENDER_BACKEND_URL
-        else:
-            raise RuntimeError(
-                "Invalid API_BASE_URL configuration. Set API_BASE_URL to a full URL, "
-                "for example: https://contractguard-backend.onrender.com"
-            )
+        base_url = DEFAULT_RENDER_BACKEND_URL
 
     return requests.post(f"{base_url}{path}", timeout=90, **kwargs)
 
@@ -76,6 +70,7 @@ if RUNNING_ON_RENDER and "onrender.com" not in API_BASE_URL:
 # 1) Header
 st.title("ContractGuard AI")
 st.caption("Upload a contract, get a safety score, summary, clause risks, and instant Q&A")
+st.caption(f"Backend endpoint: {API_BASE_URL}")
 
 # 2) Upload Contract Section
 st.subheader("Upload Contract")
