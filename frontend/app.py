@@ -1,6 +1,7 @@
 """Streamlit UI for ContractGuard AI demo flow."""
 
 import os
+import time
 from urllib.parse import urlparse
 import requests
 import streamlit as st
@@ -55,7 +56,37 @@ def _api_post(path: str, **kwargs):
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         base_url = DEFAULT_RENDER_BACKEND_URL
 
-    return requests.post(f"{base_url}{path}", timeout=90, **kwargs)
+    # Render free-tier services may return transient 503/timeouts during cold start.
+    # Warm the service and retry briefly before surfacing an error to the user.
+    timeout_seconds = kwargs.pop("timeout", 180)
+    attempts = 4
+    delay_seconds = 4
+    last_exc: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            if attempt == 1:
+                try:
+                    requests.get(f"{base_url}/", timeout=20)
+                except requests.RequestException:
+                    pass
+
+            response = requests.post(f"{base_url}{path}", timeout=timeout_seconds, **kwargs)
+            if response.status_code in {502, 503, 504} and attempt < attempts:
+                time.sleep(delay_seconds)
+                continue
+            return response
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+                continue
+            raise
+
+    if last_exc is not None:
+        raise last_exc
+
+    raise RuntimeError("Backend request failed after retries.")
 
 
 st.set_page_config(page_title="ContractGuard AI", layout="wide")
