@@ -2,6 +2,10 @@
 
 import os
 import time
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Dict, List
 from urllib.parse import urlparse
 import requests
 import streamlit as st
@@ -9,6 +13,33 @@ import streamlit as st
 
 RUNNING_ON_RENDER = os.getenv("RENDER", "").lower() == "true"
 DEFAULT_RENDER_BACKEND_URL = "https://contractguard-backend.onrender.com"
+
+LOCAL_MODE_AVAILABLE = False
+LOCAL_MODE_IMPORT_ERROR = ""
+
+try:
+    from backend.analyzer import analyze_contract
+    from backend.embedder import build_faiss_store, chunk_contract_text, retrieve_relevant_chunks
+    from backend.parser import extract_text_from_file
+    from backend.qa_chain import answer_question
+
+    LOCAL_MODE_AVAILABLE = True
+except Exception as local_import_exc:
+    LOCAL_MODE_IMPORT_ERROR = str(local_import_exc)
+
+
+class _LocalResponse:
+    def __init__(self, status_code: int, payload: dict):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict:
+        return self._payload
+
+    def raise_for_status(self) -> None:
+        if self.status_code >= 400:
+            detail = self._payload.get("detail", "Local processing error")
+            raise requests.HTTPError(f"{self.status_code} Error: {detail}")
 
 
 def _normalize_api_base_url() -> str:
@@ -46,6 +77,131 @@ def _init_state() -> None:
         st.session_state.upload_name = ""
     if "qa_answer" not in st.session_state:
         st.session_state.qa_answer = ""
+    if "local_contract_store" not in st.session_state:
+        st.session_state.local_contract_store = {}
+    if "local_contract_chunks" not in st.session_state:
+        st.session_state.local_contract_chunks = {}
+    if "local_vector_stores" not in st.session_state:
+        st.session_state.local_vector_stores = {}
+
+
+def _local_store_contract(text: str, filename: str) -> _LocalResponse:
+    contract_id = str(uuid.uuid4())
+    st.session_state.local_contract_store[contract_id] = text
+    chunks = chunk_contract_text(text)
+    st.session_state.local_contract_chunks[contract_id] = chunks
+    st.session_state.local_vector_stores[contract_id] = build_faiss_store(chunks)
+
+    return _LocalResponse(
+        200,
+        {
+            "contract_id": contract_id,
+            "filename": filename,
+            "text_preview": text[:300].replace("\n", " "),
+            "chunk_count": len(chunks),
+            "embedding_count": int(
+                st.session_state.local_vector_stores[contract_id].get("embedding_count", 0)
+            ),
+        },
+    )
+
+
+def _local_post(path: str, **kwargs) -> _LocalResponse:
+    if not LOCAL_MODE_AVAILABLE:
+        return _LocalResponse(
+            503,
+            {
+                "detail": (
+                    "Remote backend unavailable and local fallback dependencies are missing: "
+                    f"{LOCAL_MODE_IMPORT_ERROR}"
+                )
+            },
+        )
+
+    if path == "/ingest-text":
+        payload = kwargs.get("json", {})
+        raw_text = str(payload.get("text", "")).strip()
+        title = str(payload.get("title", "Pasted Contract Text")).strip() or "Pasted Contract Text"
+        if not raw_text:
+            return _LocalResponse(400, {"detail": "Text input cannot be empty"})
+        return _local_store_contract(raw_text, title)
+
+    if path == "/upload":
+        file_tuple = (kwargs.get("files") or {}).get("file")
+        if not file_tuple:
+            return _LocalResponse(400, {"detail": "No file payload provided"})
+
+        filename = str(file_tuple[0])
+        contents = file_tuple[1]
+        suffix = Path(filename).suffix.lower()
+        if suffix not in {".pdf", ".docx"}:
+            return _LocalResponse(400, {"detail": "Only PDF and DOCX files are supported"})
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(contents)
+            tmp_path = Path(tmp.name)
+
+        try:
+            text = extract_text_from_file(str(tmp_path))
+        finally:
+            try:
+                tmp_path.unlink(missing_ok=True)
+            except Exception:
+                pass
+
+        if not text or not text.strip():
+            return _LocalResponse(400, {"detail": "Could not extract text from contract"})
+
+        return _local_store_contract(text, filename)
+
+    payload = kwargs.get("json", {})
+    contract_id = str(payload.get("contract_id", ""))
+    text = st.session_state.local_contract_store.get(contract_id)
+    if path in {"/risks", "/summary", "/ask"} and not text:
+        return _LocalResponse(404, {"detail": "Unknown contract_id. Upload or ingest first."})
+
+    if path == "/risks":
+        result = analyze_contract(text)
+        return _LocalResponse(
+            200,
+            {
+                "contract_id": contract_id,
+                "risk_score": int(result.get("risk_score", result.get("safety_score", 0))),
+                "safety_score": int(result.get("safety_score", result.get("risk_score", 0))),
+                "risk_level": result.get("risk_level", "Unknown"),
+                "detected_clause_count": int(
+                    result.get("detected_clause_count", len(result.get("risks", [])))
+                ),
+                "risks": result.get("risks", []),
+            },
+        )
+
+    if path == "/summary":
+        max_chars = int(payload.get("max_chars", 600))
+        max_chars = max(100, min(max_chars, 2000))
+        return _LocalResponse(200, {"contract_id": contract_id, "summary": text[:max_chars]})
+
+    if path == "/ask":
+        question = str(payload.get("question", "")).strip()
+        if not question:
+            return _LocalResponse(400, {"detail": "Question cannot be empty"})
+        top_k = int(payload.get("top_k", 4))
+        vector_store = st.session_state.local_vector_stores.get(contract_id)
+        if vector_store is None:
+            return _LocalResponse(404, {"detail": "No vector store found for this contract."})
+        chunks = retrieve_relevant_chunks(question=question, vector_store=vector_store, top_k=top_k)
+        answer = answer_question(question, chunks)
+        return _LocalResponse(
+            200,
+            {
+                "contract_id": contract_id,
+                "question": question,
+                "answer": answer,
+                "retrieved_chunks_count": len(chunks),
+            },
+        )
+
+    return _LocalResponse(404, {"detail": f"Unsupported local endpoint: {path}"})
 
 
 def _api_post(path: str, **kwargs):
@@ -81,9 +237,13 @@ def _api_post(path: str, **kwargs):
             if attempt < attempts:
                 time.sleep(delay_seconds)
                 continue
+            if LOCAL_MODE_AVAILABLE:
+                return _local_post(path, **kwargs)
             raise
 
     if last_exc is not None:
+        if LOCAL_MODE_AVAILABLE:
+            return _local_post(path, **kwargs)
         raise last_exc
 
     raise RuntimeError("Backend request failed after retries.")
@@ -102,6 +262,8 @@ if RUNNING_ON_RENDER and "onrender.com" not in API_BASE_URL:
 st.title("ContractGuard AI")
 st.caption("Upload a contract, get a safety score, summary, clause risks, and instant Q&A")
 st.caption(f"Backend endpoint: {API_BASE_URL}")
+if LOCAL_MODE_AVAILABLE:
+    st.caption("Fallback mode: enabled (local processing if backend is unavailable)")
 
 # 2) Upload Contract Section
 st.subheader("Upload Contract")
