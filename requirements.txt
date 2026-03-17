@@ -10,3 +10,4 @@ python-multipart
 google-generativeai
 python-dotenv
 streamlit
+fpdf2
