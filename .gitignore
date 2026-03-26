@@ -32,6 +32,8 @@ Thumbs.db
 *.faiss
 *.pkl
 cache/
+models/
+data/train/
 
 # Node / frontend (if added later)
 node_modules/

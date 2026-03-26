@@ -5,6 +5,7 @@ fully with NumPy fallback vectors in constrained deployment environments.
 """
 
 from typing import Any, Dict, List
+import os
 import re
 
 import numpy as np
@@ -70,13 +71,21 @@ def chunk_contract_text(
     return chunks
 
 
-def _get_embedder(model_name: str = "all-MiniLM-L6-v2") -> Any:
+def _get_embedder(model_name: str | None = None) -> Any:
     """Lazy-load and cache the sentence-transformer model if available."""
     global _EMBEDDER_MODEL
     if SentenceTransformer is None:
         return None
+
+    resolved_model_name = (
+        model_name
+        or os.getenv("EMBEDDER_MODEL_NAME", "").strip()
+        or os.getenv("EMBEDDER_MODEL_PATH", "").strip()
+        or "all-MiniLM-L6-v2"
+    )
+
     if _EMBEDDER_MODEL is None:
-        _EMBEDDER_MODEL = SentenceTransformer(model_name)
+        _EMBEDDER_MODEL = SentenceTransformer(resolved_model_name)
     return _EMBEDDER_MODEL
 
 
