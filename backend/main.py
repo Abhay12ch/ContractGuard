@@ -13,7 +13,9 @@ incrementally upgraded during the hackathon.
 """
 
 from pathlib import Path
+import os
 import tempfile
+import time
 import uuid
 from typing import Dict, List
 
@@ -39,6 +41,13 @@ load_dotenv(PROJECT_ROOT / ".env")
 CONTRACT_STORE: Dict[str, str] = {}
 CONTRACT_CHUNKS: Dict[str, List[str]] = {}
 CONTRACT_VECTOR_STORES: Dict[str, dict] = {}
+
+
+# On Render free tier, eager embedding on upload can be slow (cold starts/model load).
+# Default to lazy indexing, and allow opting back in via env var if needed.
+PRECOMPUTE_EMBEDDINGS_ON_UPLOAD = (
+    os.getenv("PRECOMPUTE_EMBEDDINGS_ON_UPLOAD", "false").strip().lower() == "true"
+)
 
 
 class UploadResponse(BaseModel):
@@ -112,20 +121,69 @@ def _get_contract_text(contract_id: str) -> str:
     return text
 
 
+def _get_or_build_vector_store(contract_id: str) -> dict:
+    """Return cached vector store, building embeddings lazily when needed."""
+    vector_store = CONTRACT_VECTOR_STORES.get(contract_id)
+    if vector_store:
+        has_index = vector_store.get("index") is not None
+        has_vectors = vector_store.get("vectors") is not None
+        if has_index or has_vectors:
+            return vector_store
+
+    if vector_store and vector_store.get("chunks") and int(vector_store.get("embedding_count", 0)) > 0:
+        return vector_store
+
+    chunks = CONTRACT_CHUNKS.get(contract_id)
+    if chunks is None:
+        text = _get_contract_text(contract_id)
+        chunks = chunk_contract_text(text)
+        CONTRACT_CHUNKS[contract_id] = chunks
+
+    start = time.perf_counter()
+    vector_store = build_faiss_store(chunks)
+    CONTRACT_VECTOR_STORES[contract_id] = vector_store
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    print(
+        f"[ContractGuard] Built vector store lazily for {contract_id} "
+        f"in {elapsed_ms} ms (chunks={len(chunks)})."
+    )
+    return vector_store
+
+
 def _store_contract_and_index(text: str, filename: str) -> UploadResponse:
     """Store raw contract text, build chunks + FAISS store, and return metadata."""
+    start = time.perf_counter()
     contract_id = str(uuid.uuid4())
     CONTRACT_STORE[contract_id] = text
-    CONTRACT_CHUNKS[contract_id] = chunk_contract_text(text)
-    CONTRACT_VECTOR_STORES[contract_id] = build_faiss_store(CONTRACT_CHUNKS[contract_id])
+    chunks = chunk_contract_text(text)
+    CONTRACT_CHUNKS[contract_id] = chunks
+
+    embedding_count = 0
+    if PRECOMPUTE_EMBEDDINGS_ON_UPLOAD:
+        vector_store = build_faiss_store(chunks)
+        CONTRACT_VECTOR_STORES[contract_id] = vector_store
+        embedding_count = int(vector_store.get("embedding_count", 0))
+    else:
+        # Placeholder store; /ask will build vector index lazily.
+        CONTRACT_VECTOR_STORES[contract_id] = {
+            "index": None,
+            "chunks": chunks,
+            "embedding_count": 0,
+            "dimension": 0,
+        }
 
     preview = text[:300].replace("\n", " ")
+    elapsed_ms = int((time.perf_counter() - start) * 1000)
+    print(
+        f"[ContractGuard] Stored contract {contract_id} in {elapsed_ms} ms "
+        f"(chunks={len(chunks)}, precomputed={PRECOMPUTE_EMBEDDINGS_ON_UPLOAD})."
+    )
     return UploadResponse(
         contract_id=contract_id,
         filename=filename,
         text_preview=preview,
-        chunk_count=len(CONTRACT_CHUNKS[contract_id]),
-        embedding_count=int(CONTRACT_VECTOR_STORES[contract_id].get("embedding_count", 0)),
+        chunk_count=len(chunks),
+        embedding_count=embedding_count,
     )
 
 
@@ -231,12 +289,7 @@ def ask_question(payload: QARequest) -> QAResponse:
     """
 
     _ = _get_contract_text(payload.contract_id)
-    vector_store = CONTRACT_VECTOR_STORES.get(payload.contract_id)
-    if vector_store is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="No vector store found for this contract. Re-upload the document.",
-        )
+    vector_store = _get_or_build_vector_store(payload.contract_id)
 
     retrieved_chunks = retrieve_relevant_chunks(
         question=payload.question,
