@@ -11,6 +11,8 @@ from dataclasses import dataclass
 import re
 from typing import Dict, List
 
+from .analyzer import analyze_contract
+
 
 @dataclass(frozen=True)
 class CompareDimension:
@@ -185,21 +187,47 @@ def _winner_label(score_a: int, score_b: int) -> str:
     return "Tie"
 
 
-def _build_summary(score_a: int, score_b: int, winner: str) -> str:
+def _build_summary(
+    score_a: int,
+    score_b: int,
+    winner: str,
+    safety_a: int,
+    safety_b: int,
+    safer_contract: str,
+) -> str:
     if winner == "Tie":
         return (
             "Both contracts appear broadly similar on the compared clauses. "
-            f"Scores -> A: {score_a}, B: {score_b}."
+            f"Dimension scores -> A: {score_a}, B: {score_b}. "
+            f"Safety scores -> A: {safety_a}/100, B: {safety_b}/100."
         )
 
     safer = "A" if winner == "Contract A" else "B"
     other = "B" if safer == "A" else "A"
+    risk_part = (
+        f" Risk scoring indicates {safer_contract} is safer "
+        f"(A: {safety_a}/100, B: {safety_b}/100)."
+        if safer_contract != "Tie"
+        else f" Risk scoring is tied at A: {safety_a}/100 and B: {safety_b}/100."
+    )
     return (
         f"Contract {safer} appears more favorable based on liability, termination, "
         f"payment, renewal, and dispute-resolution signals. Scores -> "
         f"A: {score_a}, B: {score_b}. Contract {other} shows relatively weaker terms "
-        "in one or more dimensions."
+        f"in one or more dimensions.{risk_part}"
     )
+
+
+def _risk_snapshot(text: str) -> Dict[str, object]:
+    analysis = analyze_contract(text)
+    safety_score = int(analysis.get("safety_score", analysis.get("risk_score", 0)))
+    safety_score = max(0, min(100, safety_score))
+    return {
+        "safety_score": safety_score,
+        "risk_score": 100 - safety_score,
+        "risk_level": str(analysis.get("risk_level", "Unknown")),
+        "detected_clause_count": int(analysis.get("detected_clause_count", 0)),
+    }
 
 
 def compare_contracts(text_a: str, text_b: str) -> dict:
@@ -213,6 +241,18 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
             "contract_a_score": 0,
             "contract_b_score": 0,
             "winner": "Tie",
+            "risk_comparison": {
+                "contract_a_safety_score": 0,
+                "contract_b_safety_score": 0,
+                "contract_a_risk_score": 100,
+                "contract_b_risk_score": 100,
+                "contract_a_risk_level": "Unknown",
+                "contract_b_risk_level": "Unknown",
+                "contract_a_detected_clause_count": 0,
+                "contract_b_detected_clause_count": 0,
+                "safer_contract": "Tie",
+                "safety_score_gap": 0,
+            },
             "category_comparison": [],
             "key_differences": [],
         }
@@ -228,6 +268,17 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
     total_b = sum(int(item["score"]) for item in scored_b)
     winner = _winner_label(total_a, total_b)
 
+    risk_a = _risk_snapshot(text_a)
+    risk_b = _risk_snapshot(text_b)
+    safety_a = int(risk_a["safety_score"])
+    safety_b = int(risk_b["safety_score"])
+    if safety_a > safety_b:
+        safer_contract = "Contract A"
+    elif safety_b > safety_a:
+        safer_contract = "Contract B"
+    else:
+        safer_contract = "Tie"
+
     key_differences = [
         {
             "dimension": item["label"],
@@ -240,10 +291,22 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
     ]
 
     return {
-        "summary": _build_summary(total_a, total_b, winner),
+        "summary": _build_summary(total_a, total_b, winner, safety_a, safety_b, safer_contract),
         "contract_a_score": total_a,
         "contract_b_score": total_b,
         "winner": winner,
+        "risk_comparison": {
+            "contract_a_safety_score": safety_a,
+            "contract_b_safety_score": safety_b,
+            "contract_a_risk_score": int(risk_a["risk_score"]),
+            "contract_b_risk_score": int(risk_b["risk_score"]),
+            "contract_a_risk_level": str(risk_a["risk_level"]),
+            "contract_b_risk_level": str(risk_b["risk_level"]),
+            "contract_a_detected_clause_count": int(risk_a["detected_clause_count"]),
+            "contract_b_detected_clause_count": int(risk_b["detected_clause_count"]),
+            "safer_contract": safer_contract,
+            "safety_score_gap": abs(safety_a - safety_b),
+        },
         "category_comparison": category_comparison,
         "key_differences": key_differences,
     }

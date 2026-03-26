@@ -6,6 +6,8 @@ import tempfile
 import uuid
 import json
 import copy
+import html
+import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Any
@@ -148,6 +150,491 @@ def _init_state() -> None:
         st.session_state.local_contract_chunks = {}
     if "local_vector_stores" not in st.session_state:
         st.session_state.local_vector_stores = {}
+    if "upload_queue" not in st.session_state:
+        st.session_state.upload_queue = []
+    if "processing_count" not in st.session_state:
+        st.session_state.processing_count = 0
+    if "failed_count" not in st.session_state:
+        st.session_state.failed_count = 0
+    if "active_dashboard_tab" not in st.session_state:
+        st.session_state.active_dashboard_tab = "Upload"
+    if "contracts_show_filters" not in st.session_state:
+        st.session_state.contracts_show_filters = False
+    if "contracts_status_filter" not in st.session_state:
+        st.session_state.contracts_status_filter = "All"
+    if "contracts_search" not in st.session_state:
+        st.session_state.contracts_search = ""
+    if "analytics_view_tab" not in st.session_state:
+        st.session_state.analytics_view_tab = "Overview"
+
+
+def _format_size(size_bytes: int) -> str:
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.2f} KB"
+    return f"{size_bytes / (1024 * 1024):.2f} MB"
+
+
+def _queue_upload_item(filename: str, contract_id: str, size_bytes: int, status: str) -> None:
+    st.session_state.upload_queue.insert(
+        0,
+        {
+            "filename": filename,
+            "contract_id": contract_id,
+            "size_bytes": max(int(size_bytes), 0),
+            "status": status,
+            "uploaded_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    st.session_state.upload_queue = st.session_state.upload_queue[:20]
+
+
+def _collect_contract_rows() -> List[Dict[str, Any]]:
+    rows: List[Dict[str, Any]] = []
+
+    # Use analyzed contracts as source of truth and enrich with latest queue metadata.
+    queue_by_contract_id: Dict[str, Dict[str, Any]] = {}
+    for item in st.session_state.upload_queue:
+        contract_id = str(item.get("contract_id", "")).strip()
+        if not contract_id or contract_id == "N/A":
+            continue
+        if contract_id in queue_by_contract_id:
+            continue
+        queue_by_contract_id[contract_id] = item
+
+    for contract_id, filename in st.session_state.known_contracts.items():
+        queue_item = queue_by_contract_id.get(str(contract_id), {})
+        uploaded_at_raw = str(queue_item.get("uploaded_at", "")).strip()
+        uploaded_display = "-"
+        uploaded_sort = ""
+        if uploaded_at_raw:
+            try:
+                dt = datetime.fromisoformat(uploaded_at_raw)
+                uploaded_display = (
+                    f"{dt.strftime('%b')} {dt.day}, {dt.year} at {dt.strftime('%I:%M %p')}"
+                )
+                uploaded_sort = uploaded_at_raw
+            except ValueError:
+                uploaded_display = uploaded_at_raw
+                uploaded_sort = uploaded_at_raw
+
+        rows.append(
+            {
+                "filename": str(filename),
+                "contract_id": str(contract_id),
+                "status": "Completed",
+                "uploaded": uploaded_display,
+                "uploaded_sort": uploaded_sort,
+                "size_bytes": max(int(queue_item.get("size_bytes", 0)), 0),
+                "progress": 100,
+            }
+        )
+
+    rows.sort(key=lambda row: row.get("uploaded_sort", ""), reverse=True)
+    return rows
+
+
+def _render_contracts_tab() -> None:
+    all_rows = _collect_contract_rows()
+    total_count = len(all_rows)
+
+    panel_left, panel_right = st.columns([3.5, 1.5])
+    with panel_left:
+        st.markdown("### Advanced Search & Filters")
+    with panel_right:
+        action_left, action_right = st.columns(2)
+        with action_left:
+            if st.button("Reset", key="contracts_reset", use_container_width=True):
+                st.session_state.contracts_search = ""
+                st.session_state.contracts_status_filter = "All"
+                st.rerun()
+        with action_right:
+            toggle_text = "Hide Filters" if st.session_state.contracts_show_filters else "Show Filters"
+            if st.button(toggle_text, key="contracts_toggle_filters", use_container_width=True):
+                st.session_state.contracts_show_filters = not st.session_state.contracts_show_filters
+                st.rerun()
+
+    st.markdown("<div class='contracts-filter-shell'>", unsafe_allow_html=True)
+    st.text_input(
+        "Search Contracts",
+        placeholder="Search by filename, contract ID, or content...",
+        key="contracts_search",
+    )
+    if st.session_state.contracts_show_filters:
+        st.selectbox(
+            "Status",
+            options=["All", "Completed", "Failed"],
+            key="contracts_status_filter",
+        )
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    query = st.session_state.contracts_search.strip().lower()
+    selected_status = st.session_state.contracts_status_filter.lower()
+
+    filtered_rows = []
+    for row in all_rows:
+        if selected_status != "all" and row["status"].lower() != selected_status:
+            continue
+        searchable = f"{row['filename']} {row['contract_id']}".lower()
+        if query and query not in searchable:
+            continue
+        filtered_rows.append(row)
+
+    contracts_head_html = (
+        '<div class="contracts-list-head">'
+        '<h3 class="contracts-list-title">'
+        f'Contract List <span class="contracts-total-pill">{len(filtered_rows)} total</span>'
+        '</h3>'
+        '</div>'
+    )
+    st.markdown(contracts_head_html, unsafe_allow_html=True)
+
+    if not filtered_rows:
+        st.info("No contracts matched the current filters.")
+        return
+
+    table_rows_html = []
+    for row in filtered_rows:
+        status_lower = row["status"].lower()
+        status_class = "failed" if status_lower == "failed" else "completed"
+        progress_pct = max(0, min(int(row["progress"]), 100))
+        table_rows_html.append(
+            (
+                '<tr>'
+                '<td>'
+                f'<div class="ct-filename">{html.escape(row["filename"])}</div>'
+                f'<div class="ct-id">ID: {html.escape(row["contract_id"])}</div>'
+                '</td>'
+                f'<td><span class="ct-status {status_class}">{html.escape(row["status"])}</span></td>'
+                f'<td>{html.escape(row["uploaded"])}</td>'
+                f'<td>{_format_size(row["size_bytes"])}</td>'
+                '<td>'
+                '<div class="ct-progress-wrap">'
+                f'<div class="ct-progress-bar"><span style="width:{progress_pct}%;"></span></div>'
+                f'<div class="ct-progress-text">{progress_pct}%</div>'
+                '</div>'
+                '</td>'
+                '<td class="ct-actions">...</td>'
+                '</tr>'
+            )
+        )
+
+    contracts_table_html = (
+        '<div class="contracts-table-shell">'
+        '<table class="contracts-table">'
+        '<thead>'
+        '<tr>'
+        '<th>Filename</th>'
+        '<th>Status</th>'
+        '<th>Uploaded</th>'
+        '<th>Size</th>'
+        '<th>Progress</th>'
+        '<th>Actions</th>'
+        '</tr>'
+        '</thead>'
+        '<tbody>'
+        f"{''.join(table_rows_html)}"
+        '</tbody>'
+        '</table>'
+        '</div>'
+    )
+    st.markdown(contracts_table_html, unsafe_allow_html=True)
+
+    st.caption(f"Showing {len(filtered_rows)} of {total_count} contracts")
+
+
+def _extract_match(text: str, patterns: List[str]) -> str:
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if not match:
+            continue
+        value = ""
+        if match.groups():
+            value = str(match.group(1)).strip(" .,:;\n\t")
+        else:
+            value = str(match.group(0)).strip(" .,:;\n\t")
+        if value:
+            return value
+    return ""
+
+
+def _confidence_from_value(value: str) -> int:
+    # Confidence reflects whether the value was extracted from analyzed content.
+    return 88 if value else 0
+
+
+def _analytics_data_model() -> Dict[str, Any]:
+    risk_data = st.session_state.risk_data or {}
+    summary_text = str((st.session_state.summary_data or {}).get("summary", "")).strip()
+    risks = risk_data.get("risks", []) or []
+
+    evidence_blob = " ".join(
+        f"{str(item.get('title', ''))}. {str(item.get('evidence', ''))}"
+        for item in risks
+    )
+    analysis_text = " ".join([summary_text, evidence_blob]).strip()
+
+    customer_value = _extract_match(
+        analysis_text,
+        [
+            r"customer\s*[:\-]\s*([A-Za-z0-9&.,'\-\s]{3,80})",
+            r"client\s*[:\-]\s*([A-Za-z0-9&.,'\-\s]{3,80})",
+            r"between\s+([A-Za-z0-9&.,'\-\s]{3,60})\s+and",
+        ],
+    )
+    vendor_value = _extract_match(
+        analysis_text,
+        [
+            r"vendor\s*[:\-]\s*([A-Za-z0-9&.,'\-\s]{3,80})",
+            r"supplier\s*[:\-]\s*([A-Za-z0-9&.,'\-\s]{3,80})",
+            r"between\s+[A-Za-z0-9&.,'\-\s]{3,60}\s+and\s+([A-Za-z0-9&.,'\-\s]{3,60})",
+        ],
+    )
+    payment_terms_value = _extract_match(
+        analysis_text,
+        [
+            r"(net\s*\d{1,3})",
+            r"payment\s+within\s+\d{1,3}\s+days",
+            r"due\s+on\s+receipt",
+            r"advance\s+payment",
+        ],
+    )
+    billing_cycle_value = _extract_match(
+        analysis_text,
+        [
+            r"(\$\s?[\d,]+(?:\.\d{2})?\s+per\s+(?:month|year|quarter|week))",
+            r"billing\s+cycle\s*[:\-]\s*([A-Za-z\s]{3,40})",
+            r"(monthly|quarterly|annually|yearly|weekly)\s+billing",
+        ],
+    )
+    renewal_terms_value = _extract_match(
+        analysis_text,
+        [
+            r"([^.\n]{0,80}auto-?renew[^.\n]{0,140})",
+            r"([^.\n]{0,80}renewal[^.\n]{0,140})",
+            r"([^.\n]{0,80}term\s+of\s+\d+\s+(?:month|year)[^.\n]{0,120})",
+        ],
+    )
+
+    customer_conf = _confidence_from_value(customer_value)
+    vendor_conf = _confidence_from_value(vendor_value)
+    payment_conf = _confidence_from_value(payment_terms_value)
+    billing_conf = _confidence_from_value(billing_cycle_value)
+    terms_conf = _confidence_from_value(renewal_terms_value)
+
+    field_values = [
+        customer_value,
+        vendor_value,
+        payment_terms_value,
+        billing_cycle_value,
+        renewal_terms_value,
+    ]
+    field_confs = [customer_conf, vendor_conf, payment_conf, billing_conf, terms_conf]
+    extracted_fields = sum(1 for value in field_values if value)
+    identified_gaps = 5 - extracted_fields
+    extracted_confs = [conf for conf in field_confs if conf > 0]
+    avg_conf = int(round(sum(extracted_confs) / len(extracted_confs))) if extracted_confs else 0
+
+    terms_text = renewal_terms_value or "No renewal terms extracted from current analysis."
+
+    data_quality_rows = [
+        ("Customer Name", customer_conf),
+        ("Vendor Name", vendor_conf),
+        ("Payment Terms", payment_conf),
+        ("Billing Cycle", billing_conf),
+        ("Renewal Terms", terms_conf),
+    ]
+
+    return {
+        "extracted_fields": extracted_fields,
+        "avg_conf": avg_conf,
+        "gaps": identified_gaps,
+        "party": {
+            "customer_label": "Customer Name",
+            "customer_value": customer_value or "Not found in analysis",
+            "vendor_label": "Vendor Name",
+            "vendor_value": vendor_value or "Not found in analysis",
+            "customer_conf": customer_conf,
+            "vendor_conf": vendor_conf,
+        },
+        "financial": {
+            "payment_label": "Payment Terms",
+            "payment_value": payment_terms_value or "Not found in analysis",
+            "billing_label": "Billing Cycle",
+            "billing_value": billing_cycle_value or "Not found in analysis",
+            "payment_conf": payment_conf,
+            "billing_conf": billing_conf,
+        },
+        "terms": {
+            "title": "Renewal Terms",
+            "confidence": terms_conf,
+            "text": terms_text,
+        },
+        "quality_rows": data_quality_rows,
+    }
+
+
+def _render_analytics_tab() -> None:
+    if not st.session_state.contract_id or not st.session_state.risk_data or not st.session_state.summary_data:
+        st.info("Run contract analysis first. Analytics is populated from the latest analyzed contract.")
+        return
+
+    model = _analytics_data_model()
+
+    tab1, tab2, tab3 = st.columns(3)
+    with tab1:
+        if st.button(
+            "Overview",
+            key="analytics_tab_overview",
+            use_container_width=True,
+            type="primary" if st.session_state.analytics_view_tab == "Overview" else "secondary",
+        ):
+            st.session_state.analytics_view_tab = "Overview"
+    with tab2:
+        if st.button(
+            "Extracted Data",
+            key="analytics_tab_extracted",
+            use_container_width=True,
+            type="primary" if st.session_state.analytics_view_tab == "Extracted Data" else "secondary",
+        ):
+            st.session_state.analytics_view_tab = "Extracted Data"
+    with tab3:
+        if st.button(
+            "Processing Status",
+            key="analytics_tab_processing",
+            use_container_width=True,
+            type="primary" if st.session_state.analytics_view_tab == "Processing Status" else "secondary",
+        ):
+            st.session_state.analytics_view_tab = "Processing Status"
+
+    st.markdown(
+        f"""
+        <div class="aq-overview-card">
+            <div class="aq-overview-title">Data Quality Overview</div>
+            <div class="aq-kpi-grid">
+                <div class="aq-kpi-item">
+                    <div class="aq-kpi-value blue">{model['extracted_fields']}</div>
+                    <div class="aq-kpi-label">Fields Extracted</div>
+                </div>
+                <div class="aq-kpi-item">
+                    <div class="aq-kpi-value green">{model['avg_conf']}%</div>
+                    <div class="aq-kpi-label">Average Confidence</div>
+                </div>
+                <div class="aq-kpi-item">
+                    <div class="aq-kpi-value orange">{model['gaps']}</div>
+                    <div class="aq-kpi-label">Identified Gaps</div>
+                </div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    if st.session_state.analytics_view_tab == "Processing Status":
+        st.markdown("<div class='card'>", unsafe_allow_html=True)
+        st.write("Processing pipeline health")
+        st.progress(1.0 if st.session_state.processing_count == 0 else 0.45)
+        st.write(f"In queue: {len(st.session_state.upload_queue)}")
+        st.write(f"Currently processing: {st.session_state.processing_count}")
+        st.write(f"Failed: {st.session_state.failed_count}")
+        st.markdown("</div>", unsafe_allow_html=True)
+        return
+
+    row_one_a, row_one_b = st.columns(2)
+    with row_one_a:
+        st.markdown(
+            f"""
+            <div class="aq-panel green">
+                <div class="aq-panel-title">Party Information</div>
+                <div class="aq-chip-row soft-green">
+                    <div>
+                        <div class="aq-chip-label">{html.escape(model['party']['customer_label'])}</div>
+                        <div class="aq-chip-value">{html.escape(model['party']['customer_value'])}</div>
+                    </div>
+                    <span class="aq-conf amber">{model['party']['customer_conf']}%</span>
+                </div>
+                <div class="aq-chip-row soft-green">
+                    <div>
+                        <div class="aq-chip-label">{html.escape(model['party']['vendor_label'])}</div>
+                        <div class="aq-chip-value">{html.escape(model['party']['vendor_value'])}</div>
+                    </div>
+                    <span class="aq-conf amber">{model['party']['vendor_conf']}%</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with row_one_b:
+        st.markdown(
+            f"""
+            <div class="aq-panel blue">
+                <div class="aq-panel-title">Financial Information</div>
+                <div class="aq-chip-row soft-blue">
+                    <div>
+                        <div class="aq-chip-label">{html.escape(model['financial']['payment_label'])}</div>
+                        <div class="aq-chip-value">{html.escape(model['financial']['payment_value'])}</div>
+                    </div>
+                    <span class="aq-conf green">{model['financial']['payment_conf']}%</span>
+                </div>
+                <div class="aq-chip-row soft-blue">
+                    <div>
+                        <div class="aq-chip-label">{html.escape(model['financial']['billing_label'])}</div>
+                        <div class="aq-chip-value">{html.escape(model['financial']['billing_value'])}</div>
+                    </div>
+                    <span class="aq-conf green">{model['financial']['billing_conf']}%</span>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    row_two_a, row_two_b = st.columns(2)
+    with row_two_a:
+        st.markdown(
+            f"""
+            <div class="aq-panel purple tall">
+                <div class="aq-panel-title">Contract Terms</div>
+                <div class="aq-chip-row soft-purple">
+                    <div>
+                        <div class="aq-chip-label">{html.escape(model['terms']['title'])}</div>
+                    </div>
+                    <span class="aq-conf amber">{model['terms']['confidence']}%</span>
+                </div>
+                <div class="aq-terms-body">{html.escape(model['terms']['text'])}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    with row_two_b:
+        quality_rows_html = []
+        for label, conf in model["quality_rows"]:
+            bar_pct = max(0, min(int(conf), 100))
+            quality_rows_html.append(
+                (
+                    f'<div class="aq-quality-row">'
+                    f'<div class="aq-quality-label">{html.escape(label)}</div>'
+                    f'<div class="aq-quality-meter">'
+                    f'<div class="aq-quality-track"><span style="width:{bar_pct}%;"></span></div>'
+                    f'<div class="aq-quality-val">{bar_pct}%</div>'
+                    f'</div>'
+                    f'</div>'
+                )
+            )
+
+        quality_panel_html = (
+            '<div class="aq-panel orange tall">'
+            '<div class="aq-panel-title">Data Quality</div>'
+            f"{''.join(quality_rows_html)}"
+            '</div>'
+        )
+
+        st.markdown(
+            quality_panel_html,
+            unsafe_allow_html=True,
+        )
 
 
 def _local_store_contract(text: str, filename: str) -> _LocalResponse:
@@ -546,6 +1033,581 @@ def _inject_theme() -> None:
             font-weight: 600;
         }
 
+        .dashboard-head {
+            margin-top: 0.2rem;
+            margin-bottom: 0.65rem;
+        }
+
+        .dashboard-title {
+            margin: 0;
+            font-family: 'Space Grotesk', sans-serif;
+            font-size: 2rem;
+            color: #1f2a33;
+            line-height: 1.1;
+        }
+
+        .dashboard-sub {
+            margin: 0.3rem 0 0 0;
+            color: #5d6a74;
+            font-size: 0.98rem;
+            font-weight: 600;
+        }
+
+        .metric-card {
+            border: 1px solid rgba(31, 42, 51, 0.18);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.74);
+            box-shadow: 0 5px 16px rgba(31, 42, 51, 0.08);
+            padding: 0.95rem 1rem;
+            min-height: 98px;
+        }
+
+        .metric-label {
+            font-size: 0.95rem;
+            color: #324557;
+            font-weight: 700;
+            margin-bottom: 0.62rem;
+        }
+
+        .metric-value {
+            font-size: 2rem;
+            color: #163247;
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 700;
+            line-height: 1;
+        }
+
+        .metric-completed .metric-value {
+            color: #166534;
+        }
+
+        .metric-failed .metric-value {
+            color: #b91c1c;
+        }
+
+        .tab-strip {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.6rem;
+            margin: 1rem 0 0.9rem 0;
+        }
+
+        .tab-chip {
+            border: 1px solid rgba(31, 42, 51, 0.17);
+            border-radius: 10px;
+            background: rgba(255, 255, 255, 0.64);
+            padding: 0.58rem 0.8rem;
+            text-align: center;
+            font-weight: 700;
+            color: #304458;
+        }
+
+        .tab-chip.active {
+            border-color: rgba(15, 118, 110, 0.42);
+            background: rgba(223, 247, 243, 0.76);
+            color: #0f5f58;
+        }
+
+        .upload-shell {
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 14px;
+            background: rgba(255, 255, 255, 0.68);
+            box-shadow: 0 8px 22px rgba(31, 42, 51, 0.07);
+            padding: 1rem 1rem 0.85rem 1rem;
+        }
+
+        .upload-top {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.7rem;
+            margin-bottom: 0.8rem;
+        }
+
+        .upload-title {
+            margin: 0;
+            color: #203447;
+            font-size: 1.06rem;
+            font-weight: 800;
+            font-family: 'Space Grotesk', sans-serif;
+        }
+
+        .upload-done-pill {
+            border-radius: 999px;
+            background: #16a34a;
+            color: #ffffff;
+            font-size: 0.8rem;
+            font-weight: 700;
+            padding: 0.25rem 0.62rem;
+            border: 1px solid rgba(22, 163, 74, 0.3);
+        }
+
+        .upload-hint {
+            margin-top: 0.45rem;
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 10px;
+            padding: 0.64rem 0.72rem;
+            background: rgba(246, 250, 251, 0.84);
+            color: #5c6873;
+            font-size: 0.91rem;
+        }
+
+        .queue-shell {
+            margin-top: 1.2rem;
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 14px;
+            padding: 0.95rem;
+            background: rgba(255, 255, 255, 0.65);
+        }
+
+        .queue-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.75rem;
+        }
+
+        .queue-title {
+            margin: 0;
+            font-size: 1.02rem;
+            color: #203447;
+            font-weight: 800;
+        }
+
+        .queue-count {
+            border: 1px solid rgba(31, 42, 51, 0.24);
+            border-radius: 8px;
+            color: #304458;
+            background: rgba(255, 255, 255, 0.72);
+            padding: 0.2rem 0.45rem;
+            font-size: 0.81rem;
+            font-weight: 700;
+        }
+
+        .queue-item {
+            border: 1px solid rgba(31, 42, 51, 0.18);
+            border-radius: 10px;
+            padding: 0.64rem 0.72rem;
+            background: rgba(255, 255, 255, 0.8);
+            margin-bottom: 0.56rem;
+        }
+
+        .queue-item-main {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.5rem;
+        }
+
+        .queue-file {
+            margin: 0;
+            color: #1f3142;
+            font-weight: 700;
+            font-size: 0.93rem;
+        }
+
+        .queue-meta {
+            margin: 0.2rem 0 0 0;
+            color: #60717e;
+            font-size: 0.86rem;
+        }
+
+        .queue-size {
+            color: #4b5f71;
+            font-weight: 700;
+            font-size: 0.86rem;
+        }
+
+        .queue-status {
+            border-radius: 999px;
+            font-size: 0.76rem;
+            font-weight: 800;
+            padding: 0.17rem 0.52rem;
+            border: 1px solid transparent;
+            margin-left: 0.38rem;
+        }
+
+        .queue-status.completed {
+            background: rgba(22, 163, 74, 0.14);
+            color: #166534;
+            border-color: rgba(22, 163, 74, 0.35);
+        }
+
+        .queue-status.failed {
+            background: rgba(220, 38, 38, 0.14);
+            color: #991b1b;
+            border-color: rgba(220, 38, 38, 0.34);
+        }
+
+        .st-key-nav_upload button,
+        .st-key-nav_contracts button,
+        .st-key-nav_analytics button {
+            border-radius: 10px;
+            border: 1px solid rgba(31, 42, 51, 0.17);
+            background: rgba(255, 255, 255, 0.64);
+            color: #304458;
+            font-weight: 800;
+            min-height: 2.25rem;
+        }
+
+        .st-key-nav_upload button[kind="primary"],
+        .st-key-nav_contracts button[kind="primary"],
+        .st-key-nav_analytics button[kind="primary"] {
+            border-color: rgba(15, 118, 110, 0.42);
+            background: rgba(223, 247, 243, 0.76);
+            color: #0f5f58;
+            box-shadow: 0 8px 18px rgba(15, 118, 110, 0.12);
+        }
+
+        .contracts-filter-shell {
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 12px;
+            padding: 0.8rem 0.9rem;
+            margin-bottom: 1rem;
+            background: rgba(255, 255, 255, 0.68);
+        }
+
+        .contracts-list-head {
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-bottom: none;
+            border-radius: 12px 12px 0 0;
+            background: rgba(255, 255, 255, 0.74);
+            padding: 0.8rem 0.95rem;
+            margin-top: 0.45rem;
+        }
+
+        .contracts-list-title {
+            margin: 0;
+            color: #203447;
+            font-size: 1.03rem;
+            font-weight: 800;
+            display: flex;
+            align-items: center;
+            gap: 0.65rem;
+        }
+
+        .contracts-total-pill {
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 8px;
+            font-size: 0.82rem;
+            padding: 0.18rem 0.42rem;
+            background: rgba(255, 255, 255, 0.75);
+            color: #324557;
+        }
+
+        .contracts-table-shell {
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 0 0 12px 12px;
+            overflow: hidden;
+            background: rgba(255, 255, 255, 0.82);
+            box-shadow: 0 7px 20px rgba(31, 42, 51, 0.07);
+        }
+
+        .contracts-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .contracts-table th,
+        .contracts-table td {
+            border-bottom: 1px solid rgba(31, 42, 51, 0.15);
+            text-align: left;
+            padding: 0.62rem 0.75rem;
+            vertical-align: middle;
+            font-size: 0.9rem;
+            color: #33495d;
+        }
+
+        .contracts-table thead th {
+            background: rgba(247, 252, 251, 0.92);
+            color: #586772;
+            font-size: 0.85rem;
+            font-weight: 800;
+        }
+
+        .contracts-table tbody tr:last-child td {
+            border-bottom: none;
+        }
+
+        .ct-filename {
+            color: #1f3246;
+            font-weight: 700;
+            line-height: 1.18;
+            margin-bottom: 0.16rem;
+        }
+
+        .ct-id {
+            color: #687786;
+            font-size: 0.84rem;
+        }
+
+        .ct-status {
+            border-radius: 7px;
+            font-size: 0.8rem;
+            font-weight: 800;
+            padding: 0.2rem 0.42rem;
+            border: 1px solid transparent;
+        }
+
+        .ct-status.completed {
+            background: #1f4560;
+            color: #ffffff;
+        }
+
+        .ct-status.failed {
+            background: rgba(220, 38, 38, 0.15);
+            color: #991b1b;
+            border-color: rgba(220, 38, 38, 0.34);
+        }
+
+        .ct-progress-wrap {
+            display: flex;
+            align-items: center;
+            gap: 0.45rem;
+        }
+
+        .ct-progress-bar {
+            width: 70px;
+            height: 7px;
+            border-radius: 999px;
+            background: rgba(236, 72, 153, 0.2);
+            overflow: hidden;
+        }
+
+        .ct-progress-bar span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, #ec4899, #f43f5e);
+        }
+
+        .ct-progress-text {
+            font-weight: 700;
+            color: #546272;
+            font-size: 0.84rem;
+        }
+
+        .ct-actions {
+            color: #6f7f8e;
+            font-weight: 700;
+        }
+
+        .st-key-analytics_tab_overview button,
+        .st-key-analytics_tab_extracted button,
+        .st-key-analytics_tab_processing button {
+            border-radius: 10px;
+            border: 1px solid rgba(31, 42, 51, 0.16);
+            background: rgba(255, 255, 255, 0.72);
+            color: #31475a;
+            font-weight: 800;
+            min-height: 2.35rem;
+        }
+
+        .st-key-analytics_tab_overview button[kind="primary"],
+        .st-key-analytics_tab_extracted button[kind="primary"],
+        .st-key-analytics_tab_processing button[kind="primary"] {
+            border-color: rgba(47, 114, 255, 0.3);
+            box-shadow: 0 8px 16px rgba(47, 114, 255, 0.1);
+        }
+
+        .aq-overview-card {
+            margin-top: 0.78rem;
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-left: 3px solid #3b82f6;
+            border-radius: 12px;
+            padding: 0.95rem 1rem;
+            background: rgba(255, 255, 255, 0.74);
+        }
+
+        .aq-overview-title {
+            font-size: 1.02rem;
+            color: #253d51;
+            font-weight: 800;
+            margin-bottom: 0.72rem;
+        }
+
+        .aq-kpi-grid {
+            display: grid;
+            grid-template-columns: repeat(3, minmax(0, 1fr));
+            gap: 0.75rem;
+        }
+
+        .aq-kpi-item {
+            text-align: center;
+        }
+
+        .aq-kpi-value {
+            font-size: 2rem;
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 700;
+            line-height: 1;
+            margin-bottom: 0.32rem;
+        }
+
+        .aq-kpi-value.blue {
+            color: #2563eb;
+        }
+
+        .aq-kpi-value.green {
+            color: #16a34a;
+        }
+
+        .aq-kpi-value.orange {
+            color: #ea580c;
+        }
+
+        .aq-kpi-label {
+            color: #677786;
+            font-size: 0.91rem;
+            font-weight: 700;
+        }
+
+        .aq-panel {
+            margin-top: 1rem;
+            border: 1px solid rgba(31, 42, 51, 0.2);
+            border-radius: 12px;
+            background: rgba(255, 255, 255, 0.76);
+            padding: 0.9rem 0.9rem 0.7rem 0.9rem;
+        }
+
+        .aq-panel.green {
+            border-left: 3px solid #22c55e;
+        }
+
+        .aq-panel.blue {
+            border-left: 3px solid #3b82f6;
+        }
+
+        .aq-panel.purple {
+            border-left: 3px solid #a855f7;
+        }
+
+        .aq-panel.orange {
+            border-left: 3px solid #f97316;
+        }
+
+        .aq-panel.tall {
+            min-height: 400px;
+        }
+
+        .aq-panel-title {
+            color: #223a4f;
+            font-weight: 800;
+            font-size: 1rem;
+            margin-bottom: 0.7rem;
+        }
+
+        .aq-chip-row {
+            border-radius: 9px;
+            padding: 0.68rem 0.62rem;
+            margin-bottom: 0.62rem;
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 0.45rem;
+        }
+
+        .aq-chip-row.soft-green {
+            background: rgba(214, 236, 221, 0.62);
+        }
+
+        .aq-chip-row.soft-blue {
+            background: rgba(217, 230, 246, 0.62);
+        }
+
+        .aq-chip-row.soft-purple {
+            background: rgba(235, 224, 250, 0.62);
+        }
+
+        .aq-chip-label {
+            color: #1f4861;
+            font-size: 0.98rem;
+            font-weight: 700;
+            line-height: 1.15;
+        }
+
+        .aq-chip-value {
+            color: #19435b;
+            margin-top: 0.4rem;
+            font-size: 1.55rem;
+            font-family: 'Space Grotesk', sans-serif;
+            font-weight: 700;
+            line-height: 1.1;
+        }
+
+        .aq-conf {
+            border-radius: 7px;
+            color: #ffffff;
+            padding: 0.17rem 0.45rem;
+            font-size: 0.82rem;
+            font-weight: 800;
+            border: 1px solid transparent;
+            white-space: nowrap;
+        }
+
+        .aq-conf.green {
+            background: #16a34a;
+        }
+
+        .aq-conf.amber {
+            background: #ca8a04;
+        }
+
+        .aq-terms-body {
+            margin-top: 0.2rem;
+            color: #7c3aed;
+            font-size: 0.94rem;
+            line-height: 1.34;
+            font-weight: 700;
+            max-height: 320px;
+            overflow: auto;
+            padding-right: 0.2rem;
+        }
+
+        .aq-quality-row {
+            border-radius: 9px;
+            background: rgba(248, 242, 234, 0.9);
+            padding: 0.55rem 0.58rem;
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 0.55rem;
+        }
+
+        .aq-quality-label {
+            color: #b45309;
+            font-weight: 700;
+            font-size: 0.92rem;
+        }
+
+        .aq-quality-meter {
+            display: flex;
+            align-items: center;
+            gap: 0.42rem;
+        }
+
+        .aq-quality-track {
+            width: 74px;
+            height: 7px;
+            border-radius: 999px;
+            background: rgba(148, 163, 184, 0.35);
+            overflow: hidden;
+        }
+
+        .aq-quality-track span {
+            display: block;
+            height: 100%;
+            background: linear-gradient(90deg, #ec4899, #f43f5e);
+        }
+
+        .aq-quality-val {
+            color: #ea580c;
+            font-size: 0.87rem;
+            font-weight: 800;
+            min-width: 35px;
+            text-align: right;
+        }
+
         @keyframes fadeUp {
             from {
                 opacity: 0;
@@ -765,6 +1827,27 @@ def _analysis_report_pdf_bytes(report_lang_code: str, report_lang_name: str) -> 
             ),
         )
 
+        risk_compare = details.get("risk_comparison", {}) or {}
+        if risk_compare:
+            pdf.ln(1)
+            pdf.multi_cell(
+                0,
+                7,
+                _safe_pdf_text(
+                    f"{_translate_for_ui('Risk Score Comparison', report_lang_code)}:\n"
+                    f"A Safety: {int(risk_compare.get('contract_a_safety_score', 0))}/100 | "
+                    f"A Risk: {int(risk_compare.get('contract_a_risk_score', 100))}/100 | "
+                    f"A Level: {risk_compare.get('contract_a_risk_level', 'Unknown')}\n"
+                    f"B Safety: {int(risk_compare.get('contract_b_safety_score', 0))}/100 | "
+                    f"B Risk: {int(risk_compare.get('contract_b_risk_score', 100))}/100 | "
+                    f"B Level: {risk_compare.get('contract_b_risk_level', 'Unknown')}\n"
+                    f"{_translate_for_ui('Safer Contract', report_lang_code)}: "
+                    f"{risk_compare.get('safer_contract', 'Tie')} "
+                    f"({_translate_for_ui('Safety Score Gap', report_lang_code)}: "
+                    f"{int(risk_compare.get('safety_score_gap', 0))})"
+                ),
+            )
+
     output = pdf.output(dest="S")
     return output.encode("latin-1") if isinstance(output, str) else bytes(output)
 
@@ -892,6 +1975,19 @@ def _translated_compare_data(compare_data: Dict[str, Any], target_lang: str) -> 
     details["summary"] = _translate_for_ui(str(details.get("summary", "")), target_lang)
     details["winner"] = _translate_for_ui(str(details.get("winner", "Tie")), target_lang)
 
+    risk_comparison = dict(details.get("risk_comparison", {}) or {})
+    if risk_comparison:
+        risk_comparison["contract_a_risk_level"] = _translate_for_ui(
+            str(risk_comparison.get("contract_a_risk_level", "Unknown")), target_lang
+        )
+        risk_comparison["contract_b_risk_level"] = _translate_for_ui(
+            str(risk_comparison.get("contract_b_risk_level", "Unknown")), target_lang
+        )
+        risk_comparison["safer_contract"] = _translate_for_ui(
+            str(risk_comparison.get("safer_contract", "Tie")), target_lang
+        )
+    details["risk_comparison"] = risk_comparison
+
     translated_rows = []
     for row in details.get("category_comparison", []):
         row_copy = dict(row)
@@ -926,11 +2022,10 @@ if RUNNING_ON_RENDER and "onrender.com" not in API_BASE_URL:
 # 1) Header
 st.markdown(
     """
-    <section class="hero-wrap">
-        <div class="hero-kicker">Contract Intelligence</div>
-        <h1 class="hero-title">ContractGuard AI</h1>
-        <p class="hero-sub">Upload or paste a contract and get rapid risk insights, a focused summary, and clause-aware Q&A in one place.</p>
-    </section>
+    <div class="dashboard-head">
+        <h1 class="dashboard-title">Contract Intelligence</h1>
+        <p class="dashboard-sub">Upload, process, and analyze your contracts with AI-powered extraction</p>
+    </div>
     """,
     unsafe_allow_html=True,
 )
@@ -958,6 +2053,79 @@ if st.session_state.selected_language_code != "en":
     )
 
 st.markdown("<hr class='divider' />", unsafe_allow_html=True)
+
+total_contracts = len(st.session_state.known_contracts)
+completed_contracts = sum(
+    1 for item in st.session_state.upload_queue if str(item.get("status", "")).lower() == "completed"
+)
+
+metric_cols = st.columns(4)
+with metric_cols[0]:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">Total Contracts</div>
+            <div class="metric-value">{total_contracts}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with metric_cols[1]:
+    st.markdown(
+        f"""
+        <div class="metric-card">
+            <div class="metric-label">Processing</div>
+            <div class="metric-value">{st.session_state.processing_count}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with metric_cols[2]:
+    st.markdown(
+        f"""
+        <div class="metric-card metric-completed">
+            <div class="metric-label">Completed</div>
+            <div class="metric-value">{completed_contracts}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with metric_cols[3]:
+    st.markdown(
+        f"""
+        <div class="metric-card metric-failed">
+            <div class="metric-label">Failed</div>
+            <div class="metric-value">{st.session_state.failed_count}</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+tab_col_1, tab_col_2, tab_col_3 = st.columns(3)
+with tab_col_1:
+    if st.button(
+        "Upload",
+        key="nav_upload",
+        use_container_width=True,
+        type="primary" if st.session_state.active_dashboard_tab == "Upload" else "secondary",
+    ):
+        st.session_state.active_dashboard_tab = "Upload"
+with tab_col_2:
+    if st.button(
+        "Contracts",
+        key="nav_contracts",
+        use_container_width=True,
+        type="primary" if st.session_state.active_dashboard_tab == "Contracts" else "secondary",
+    ):
+        st.session_state.active_dashboard_tab = "Contracts"
+with tab_col_3:
+    if st.button(
+        "Analytics",
+        key="nav_analytics",
+        use_container_width=True,
+        type="primary" if st.session_state.active_dashboard_tab == "Analytics" else "secondary",
+    ):
+        st.session_state.active_dashboard_tab = "Analytics"
 
 with st.sidebar:
     st.subheader("Workspace")
@@ -1028,12 +2196,43 @@ with st.sidebar:
         st.rerun()
 
 # 2) Upload Contract Section
-st.subheader("Contract Ingestion")
+if st.session_state.active_dashboard_tab == "Contracts":
+    _render_contracts_tab()
+    st.stop()
+
+if st.session_state.active_dashboard_tab == "Analytics":
+    _render_analytics_tab()
+    st.stop()
+
+completed_badge_count = sum(
+    1 for item in st.session_state.upload_queue if str(item.get("status", "")).lower() == "completed"
+)
+st.markdown(
+    f"""
+    <div class="upload-shell">
+        <div class="upload-top">
+            <h3 class="upload-title">Upload Contracts</h3>
+            <span class="upload-done-pill">{completed_badge_count} completed</span>
+        </div>
+    """,
+    unsafe_allow_html=True,
+)
+
 tab_upload, tab_text = st.tabs(["Upload File", "Paste Text"])
 
 with tab_upload:
-    uploaded_file = st.file_uploader("Drop PDF or DOCX", type=["pdf", "docx"])
-    process_file_clicked = st.button("Analyze Uploaded Contract", type="primary", use_container_width=True)
+    st.markdown(
+        """
+        <div style="text-align:center;border:2px dashed rgba(236, 72, 153, 0.35);border-radius:12px;padding:2rem 1rem;background:rgba(252, 245, 250, 0.55);margin-bottom:0.65rem;">
+            <div style="font-size:2rem;line-height:1;">📄</div>
+            <div style="margin-top:0.45rem;font-weight:800;color:#2b3f52;">Drag &amp; drop contracts or click to browse</div>
+            <div style="margin-top:0.22rem;color:#6a7682;font-size:0.9rem;">Supports PDF files up to 50MB</div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    uploaded_file = st.file_uploader("Choose Files", type=["pdf", "docx"])
+    process_file_clicked = st.button("Process Uploaded Contract", type="primary", use_container_width=True)
 
 with tab_text:
     manual_title = st.text_input("Text Title", value="Pasted Contract Text")
@@ -1044,10 +2243,22 @@ with tab_text:
     )
     process_text_clicked = st.button("Analyze Pasted Text", use_container_width=True)
 
+st.markdown(
+    """
+    <div class="upload-hint">
+        Files are processed in the background. You can continue using the application while processing completes.
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+st.markdown("</div>", unsafe_allow_html=True)
+
 if process_file_clicked:
     if uploaded_file is None:
         st.warning("Please upload a contract file first.")
     else:
+        st.session_state.processing_count += 1
         with st.spinner("Uploading and analyzing contract..."):
             try:
                 files = {
@@ -1079,15 +2290,31 @@ if process_file_clicked:
                     st.session_state.risk_data,
                     st.session_state.summary_data,
                 )
+                _queue_upload_item(
+                    filename=filename,
+                    contract_id=contract_id,
+                    size_bytes=int(getattr(uploaded_file, "size", len(uploaded_file.getvalue()))),
+                    status="Completed",
+                )
 
                 st.success("Analysis complete.")
             except (requests.RequestException, RuntimeError) as exc:
+                st.session_state.failed_count += 1
+                _queue_upload_item(
+                    filename=getattr(uploaded_file, "name", "Uploaded File"),
+                    contract_id="N/A",
+                    size_bytes=int(getattr(uploaded_file, "size", 0)),
+                    status="Failed",
+                )
                 st.error(f"API error: {exc}")
+            finally:
+                st.session_state.processing_count = max(st.session_state.processing_count - 1, 0)
 
 if process_text_clicked:
     if not manual_text.strip():
         st.warning("Please paste contract text first.")
     else:
+        st.session_state.processing_count += 1
         with st.spinner("Analyzing pasted text..."):
             try:
                 ingest_resp = _api_post(
@@ -1115,10 +2342,62 @@ if process_text_clicked:
                     st.session_state.risk_data,
                     st.session_state.summary_data,
                 )
+                _queue_upload_item(
+                    filename=filename,
+                    contract_id=contract_id,
+                    size_bytes=len(manual_text.encode("utf-8")),
+                    status="Completed",
+                )
 
                 st.success("Text analysis complete.")
             except (requests.RequestException, RuntimeError) as exc:
+                st.session_state.failed_count += 1
+                _queue_upload_item(
+                    filename=manual_title or "Pasted Contract Text",
+                    contract_id="N/A",
+                    size_bytes=len(manual_text.encode("utf-8")),
+                    status="Failed",
+                )
                 st.error(f"API error: {exc}")
+            finally:
+                st.session_state.processing_count = max(st.session_state.processing_count - 1, 0)
+
+queue_items = st.session_state.upload_queue
+st.markdown(
+    f"""
+    <div class="queue-shell">
+        <div class="queue-head">
+            <h3 class="queue-title">Upload Queue</h3>
+            <span class="queue-count">{len(queue_items)} files</span>
+        </div>
+    """,
+    unsafe_allow_html=True,
+)
+
+if not queue_items:
+    st.info("No files processed yet.")
+else:
+    for item in queue_items[:8]:
+        status = str(item.get("status", "Completed")).strip().lower()
+        status_class = "failed" if status == "failed" else "completed"
+        st.markdown(
+            f"""
+            <div class="queue-item">
+                <div class="queue-item-main">
+                    <div>
+                        <p class="queue-file">{item.get('filename', 'Unknown file')}
+                            <span class="queue-status {status_class}">{item.get('status', 'Completed')}</span>
+                        </p>
+                        <p class="queue-meta">Contract ID: {item.get('contract_id', 'N/A')}</p>
+                    </div>
+                    <div class="queue-size">{_format_size(int(item.get('size_bytes', 0)))}</div>
+                </div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+st.markdown("</div>", unsafe_allow_html=True)
 
 if st.session_state.contract_id:
     ui_language = st.session_state.selected_language_code
@@ -1295,12 +2574,48 @@ else:
         )
         details = compare_data.get("details", {})
         winner = details.get("winner", "Tie")
+        risk_compare = details.get("risk_comparison", {}) or {}
 
         st.markdown("### Comparison Outcome")
         st.markdown("<div class='card'>", unsafe_allow_html=True)
         st.write(compare_data.get("summary", "No summary available."))
         st.write(f"Winner: {winner}")
         st.markdown("</div>", unsafe_allow_html=True)
+
+        if risk_compare:
+            lang = st.session_state.selected_language_code
+            st.markdown(f"### {_translate_for_ui('Risk Score Comparison', lang)}")
+
+            score_col_a, score_col_b, score_col_c = st.columns(3)
+            with score_col_a:
+                st.metric(
+                    _translate_for_ui("Contract A Safety", lang),
+                    f"{int(risk_compare.get('contract_a_safety_score', 0))}/100",
+                    f"Risk {int(risk_compare.get('contract_a_risk_score', 100))}/100",
+                )
+                st.caption(
+                    f"{_translate_for_ui('Risk Level', lang)}: "
+                    f"{risk_compare.get('contract_a_risk_level', 'Unknown')}"
+                )
+            with score_col_b:
+                st.metric(
+                    _translate_for_ui("Contract B Safety", lang),
+                    f"{int(risk_compare.get('contract_b_safety_score', 0))}/100",
+                    f"Risk {int(risk_compare.get('contract_b_risk_score', 100))}/100",
+                )
+                st.caption(
+                    f"{_translate_for_ui('Risk Level', lang)}: "
+                    f"{risk_compare.get('contract_b_risk_level', 'Unknown')}"
+                )
+            with score_col_c:
+                st.metric(
+                    _translate_for_ui("Safer Contract", lang),
+                    str(risk_compare.get("safer_contract", "Tie")),
+                )
+                st.caption(
+                    f"{_translate_for_ui('Safety Score Gap', lang)}: "
+                    f"{int(risk_compare.get('safety_score_gap', 0))}"
+                )
 
         category_rows = details.get("category_comparison", [])
         if category_rows:
