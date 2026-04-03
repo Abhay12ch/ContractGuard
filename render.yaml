@@ -1,7 +1,7 @@
 services:
   - type: web
     name: contractguard-backend
-    env: python
+    runtime: python
     plan: free
     healthCheckPath: /
     buildCommand: pip install -r requirements-backend.txt
@@ -14,7 +14,7 @@ services:
 
   - type: web
     name: contractguard-frontend
-    env: python
+    runtime: python
     plan: free
     healthCheckPath: /
     buildCommand: pip install -r requirements-frontend.txt

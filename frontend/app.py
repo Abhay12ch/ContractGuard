@@ -26,10 +26,10 @@ LOCAL_MODE_AVAILABLE = False
 LOCAL_MODE_IMPORT_ERROR = ""
 
 try:
-    from backend.analyzer import analyze_contract
-    from backend.embedder import build_faiss_store, chunk_contract_text, retrieve_relevant_chunks
-    from backend.parser import extract_text_from_file
-    from backend.qa_chain import answer_question
+    from backend.contracts.analyzer import analyze_contract
+    from backend.contracts.embedder import build_faiss_store, chunk_contract_text, retrieve_relevant_chunks
+    from backend.contracts.parser import extract_text_from_file
+    from backend.contracts.qa_chain import answer_question
 
     LOCAL_MODE_AVAILABLE = True
 except Exception as local_import_exc:

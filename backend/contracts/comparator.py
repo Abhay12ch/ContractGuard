@@ -108,6 +108,10 @@ DIMENSIONS: List[CompareDimension] = [
     ),
 ]
 
+CONTRACT_A_LABEL = "Contract A"
+CONTRACT_B_LABEL = "Contract B"
+TIE_LABEL = "Tie"
+
 
 def _split_clauses(text: str) -> List[str]:
     collapsed = re.sub(r"\s+", " ", text or "").strip()
@@ -181,10 +185,10 @@ def _compare_dimension(
 
 def _winner_label(score_a: int, score_b: int) -> str:
     if score_a > score_b:
-        return "Contract A"
+        return CONTRACT_A_LABEL
     if score_b > score_a:
-        return "Contract B"
-    return "Tie"
+        return CONTRACT_B_LABEL
+    return TIE_LABEL
 
 
 def _build_summary(
@@ -195,14 +199,14 @@ def _build_summary(
     safety_b: int,
     safer_contract: str,
 ) -> str:
-    if winner == "Tie":
+    if winner == TIE_LABEL:
         return (
             "Both contracts appear broadly similar on the compared clauses. "
             f"Dimension scores -> A: {score_a}, B: {score_b}. "
             f"Safety scores -> A: {safety_a}/100, B: {safety_b}/100."
         )
 
-    safer = "A" if winner == "Contract A" else "B"
+    safer = "A" if winner == CONTRACT_A_LABEL else "B"
     other = "B" if safer == "A" else "A"
     risk_part = (
         f" Risk scoring indicates {safer_contract} is safer "
@@ -273,11 +277,11 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
     safety_a = int(risk_a["safety_score"])
     safety_b = int(risk_b["safety_score"])
     if safety_a > safety_b:
-        safer_contract = "Contract A"
+        safer_contract = CONTRACT_A_LABEL
     elif safety_b > safety_a:
-        safer_contract = "Contract B"
+        safer_contract = CONTRACT_B_LABEL
     else:
-        safer_contract = "Tie"
+        safer_contract = TIE_LABEL
 
     key_differences = [
         {
@@ -287,7 +291,7 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
             "contract_b_evidence": item["contract_b_evidence"],
         }
         for item in category_comparison
-        if item["better_contract"] != "Tie"
+        if item["better_contract"] != TIE_LABEL
     ]
 
     return {
@@ -310,3 +314,6 @@ def compare_contracts(text_a: str, text_b: str) -> dict:
         "category_comparison": category_comparison,
         "key_differences": key_differences,
     }
+
+
+__all__ = ["CompareDimension", "compare_contracts"]

@@ -1,190 +1,156 @@
 """FastAPI entrypoint for ContractGuard.
 
-This file exposes the main HTTP API used by the frontend:
+API surface:
 - POST /upload   : upload a contract (PDF/DOCX), returns contract_id
 - POST /summary  : get plain-language summary
 - POST /risks    : get risky clauses + risk score
 - POST /ask      : ask a question about a contract
 - POST /compare  : compare two uploaded contracts
-
-The actual AI logic lives in the helper modules (parser, analyzer, qa_chain,
-comparator). For now, those modules contain stub implementations that can be
-incrementally upgraded during the hackathon.
 """
 
-from pathlib import Path
-import os
+from __future__ import annotations
+
+from contextlib import asynccontextmanager
+import logging
 import tempfile
-import time
-import uuid
-from typing import Dict, List
+from pathlib import Path
+from typing import Annotated
 
-from fastapi import FastAPI, File, HTTPException, UploadFile, status
-from pydantic import BaseModel
-from dotenv import load_dotenv
+from fastapi import FastAPI, File, HTTPException, UploadFile
+from fastapi.concurrency import run_in_threadpool
 
-from .parser import extract_text_from_file
-from .analyzer import analyze_contract
-from .qa_chain import answer_question
-from .comparator import compare_contracts
-from .embedder import build_faiss_store, chunk_contract_text, retrieve_relevant_chunks
+from .api.errors import to_http_exception
+from .api.schemas import (
+    ContractStatusResponse,
+    CompareRequest,
+    CompareResponse,
+    IngestTextRequest,
+    QARequest,
+    QAResponse,
+    RisksRequest,
+    RisksResponse,
+    SummaryRequest,
+    SummaryResponse,
+    UploadResponse,
+)
+from .contracts.analyzer import analyze_contract
+from .contracts.comparator import compare_contracts
+from .contracts.embedder import retrieve_relevant_chunks, warmup_embedder
+from .contracts.parser import extract_text_from_file
+from .contracts.qa_chain import answer_question
+from .contracts.services import ContractService
+from .contracts.store import InMemoryContractStore
+from .core.config import settings
+from .core.exceptions import (
+    ContractGuardError,
+    ContractNotFoundError,
+    ContractStorageError,
+    EmptyContractTextError,
+    IndexingFailedError,
+    IndexingInProgressError,
+)
+from .core.logging_config import configure_logging
+from .ingestion.queue import IndexingJobQueue
+from .ingestion.upload_validation import validate_upload_payload
 
 
-app = FastAPI(title="ContractGuard API")
+configure_logging(settings)
+logger = logging.getLogger("contractguard.api")
 
 
-# Load environment variables from project root .env (if present)
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(PROJECT_ROOT / ".env")
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    """Application lifespan hooks for startup/shutdown tasks."""
+    if settings.async_indexing_enabled:
+        indexing_queue.start()
+
+    if settings.prewarm_embedder_on_startup:
+        try:
+            loaded = await run_in_threadpool(warmup_embedder)
+            if loaded:
+                logger.info("Embedder prewarm complete.")
+            else:
+                logger.info("Embedder prewarm skipped (no active embedding backend warmed).")
+        except (RuntimeError, OSError, ValueError) as exc:  # pragma: no cover - defensive startup logging
+            logger.warning("Embedder prewarm failed during startup: %s", exc)
+
+    try:
+        yield
+    finally:
+        if settings.async_indexing_enabled:
+            indexing_queue.stop()
 
 
-CONTRACT_STORE: Dict[str, str] = {}
-CONTRACT_CHUNKS: Dict[str, List[str]] = {}
-CONTRACT_VECTOR_STORES: Dict[str, dict] = {}
+app = FastAPI(title=settings.app_name, lifespan=_lifespan)
 
-
-# On Render free tier, eager embedding on upload can be slow (cold starts/model load).
-# Default to lazy indexing, and allow opting back in via env var if needed.
-PRECOMPUTE_EMBEDDINGS_ON_UPLOAD = (
-    os.getenv("PRECOMPUTE_EMBEDDINGS_ON_UPLOAD", "false").strip().lower() == "true"
+store = InMemoryContractStore()
+contract_service = ContractService(
+    store,
+    precompute_embeddings_on_upload=settings.precompute_embeddings_on_upload,
+)
+indexing_queue = IndexingJobQueue(
+    contract_service,
+    max_size=settings.indexing_queue_max_size,
 )
 
 
-class UploadResponse(BaseModel):
-    contract_id: str
-    filename: str
-    text_preview: str
-    chunk_count: int
-    embedding_count: int
-
-
-class IngestTextRequest(BaseModel):
-    text: str
-    title: str = "Pasted Contract Text"
-
-
-class SummaryRequest(BaseModel):
-    contract_id: str
-    max_chars: int = 600
-
-
-class SummaryResponse(BaseModel):
-    contract_id: str
-    summary: str
-
-
-class RisksRequest(BaseModel):
-    contract_id: str
-
-
-class RisksResponse(BaseModel):
-    contract_id: str
-    risk_score: int
-    safety_score: int
-    risk_level: str
-    detected_clause_count: int
-    risks: List[dict]
-
-
-class QARequest(BaseModel):
-    contract_id: str
-    question: str
-    top_k: int = 4
-
-
-class QAResponse(BaseModel):
-    contract_id: str
-    question: str
-    answer: str
-    retrieved_chunks_count: int
-
-
-class CompareRequest(BaseModel):
-    contract_id_a: str
-    contract_id_b: str
-
-
-class CompareResponse(BaseModel):
-    contract_id_a: str
-    contract_id_b: str
-    summary: str
-    details: dict
+def _cleanup_temp_file(tmp_path: Path) -> None:
+    try:
+        tmp_path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Failed to remove temp file: %s", tmp_path)
 
 
 def _get_contract_text(contract_id: str) -> str:
-    text = CONTRACT_STORE.get(contract_id)
-    if not text:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Unknown contract_id. Upload the contract first.",
+    try:
+        return contract_service.require_contract_text(contract_id)
+    except ContractNotFoundError as exc:
+        raise to_http_exception(exc) from exc
+
+
+def _clamp_summary_chars(requested: int) -> int:
+    return max(settings.summary_min_chars, min(requested, settings.summary_max_chars))
+
+
+def _submit_indexing_job(contract_id: str) -> None:
+    if settings.async_indexing_enabled:
+        indexing_queue.submit(contract_id)
+
+
+def _contract_status(contract_id: str) -> ContractStatusResponse:
+    status_record = indexing_queue.get_status(contract_id) if settings.async_indexing_enabled else None
+    if status_record is not None:
+        return ContractStatusResponse(
+            contract_id=contract_id,
+            status=status_record.status,
+            embedding_count=status_record.embedding_count,
+            error=status_record.error,
         )
-    return text
 
-
-def _get_or_build_vector_store(contract_id: str) -> dict:
-    """Return cached vector store, building embeddings lazily when needed."""
-    vector_store = CONTRACT_VECTOR_STORES.get(contract_id)
-    if vector_store:
-        has_index = vector_store.get("index") is not None
-        has_vectors = vector_store.get("vectors") is not None
-        if has_index or has_vectors:
-            return vector_store
-
-    if vector_store and vector_store.get("chunks") and int(vector_store.get("embedding_count", 0)) > 0:
-        return vector_store
-
-    chunks = CONTRACT_CHUNKS.get(contract_id)
-    if chunks is None:
-        text = _get_contract_text(contract_id)
-        chunks = chunk_contract_text(text)
-        CONTRACT_CHUNKS[contract_id] = chunks
-
-    start = time.perf_counter()
-    vector_store = build_faiss_store(chunks)
-    CONTRACT_VECTOR_STORES[contract_id] = vector_store
-    elapsed_ms = int((time.perf_counter() - start) * 1000)
-    print(
-        f"[ContractGuard] Built vector store lazily for {contract_id} "
-        f"in {elapsed_ms} ms (chunks={len(chunks)})."
-    )
-    return vector_store
-
-
-def _store_contract_and_index(text: str, filename: str) -> UploadResponse:
-    """Store raw contract text, build chunks + FAISS store, and return metadata."""
-    start = time.perf_counter()
-    contract_id = str(uuid.uuid4())
-    CONTRACT_STORE[contract_id] = text
-    chunks = chunk_contract_text(text)
-    CONTRACT_CHUNKS[contract_id] = chunks
-
-    embedding_count = 0
-    if PRECOMPUTE_EMBEDDINGS_ON_UPLOAD:
-        vector_store = build_faiss_store(chunks)
-        CONTRACT_VECTOR_STORES[contract_id] = vector_store
-        embedding_count = int(vector_store.get("embedding_count", 0))
-    else:
-        # Placeholder store; /ask will build vector index lazily.
-        CONTRACT_VECTOR_STORES[contract_id] = {
-            "index": None,
-            "chunks": chunks,
-            "embedding_count": 0,
-            "dimension": 0,
-        }
-
-    preview = text[:300].replace("\n", " ")
-    elapsed_ms = int((time.perf_counter() - start) * 1000)
-    print(
-        f"[ContractGuard] Stored contract {contract_id} in {elapsed_ms} ms "
-        f"(chunks={len(chunks)}, precomputed={PRECOMPUTE_EMBEDDINGS_ON_UPLOAD})."
-    )
-    return UploadResponse(
+    vector_store = store.get_vector_store(contract_id) or {}
+    embedding_count = int(vector_store.get("embedding_count", 0))
+    status = "ready" if embedding_count > 0 else "processing"
+    return ContractStatusResponse(
         contract_id=contract_id,
-        filename=filename,
-        text_preview=preview,
-        chunk_count=len(chunks),
+        status=status,
         embedding_count=embedding_count,
+        error=None,
     )
+
+
+def _extract_text_from_upload_bytes(filename: str, contents: bytes) -> str:
+    suffix = Path(filename).suffix.lower()
+    try:
+        with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+            tmp.write(contents)
+            tmp_path = Path(tmp.name)
+    except OSError as exc:
+        raise ContractStorageError(filename) from exc
+
+    try:
+        return extract_text_from_file(str(tmp_path))
+    finally:
+        _cleanup_temp_file(tmp_path)
 
 
 @app.get("/", summary="Health check")
@@ -192,78 +158,96 @@ def root() -> dict:
     return {"message": "ContractGuard backend is running"}
 
 
-@app.post("/upload", response_model=UploadResponse)
-async def upload_contract(file: UploadFile = File(...)) -> UploadResponse:
-    """Upload a contract file (PDF/DOCX) and return a contract_id.
-
-    The file is written to a temporary location and parsed via parser.extract_text_from_file.
-    Parsed text is stored in-memory for subsequent operations.
-    """
-
+@app.post("/upload", responses={400: {"description": "Invalid file upload request"}})
+async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadResponse:
+    """Upload a contract file (PDF/DOCX) and return a contract_id."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
-    suffix = Path(file.filename).suffix.lower()
-    if suffix not in {".pdf", ".docx"}:
-        raise HTTPException(status_code=400, detail="Only PDF and DOCX files are supported")
-
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        contents = await file.read()
-        tmp.write(contents)
-        tmp_path = Path(tmp.name)
+    contents = await file.read()
 
     try:
-        text = extract_text_from_file(str(tmp_path))
-    finally:
-        # Best-effort cleanup of the temp file
-        try:
-            tmp_path.unlink(missing_ok=True)
-        except Exception:
-            pass
+        await run_in_threadpool(
+            validate_upload_payload,
+            filename=file.filename,
+            content_type=file.content_type,
+            contents=contents,
+            max_bytes=settings.upload_max_bytes,
+        )
+        text = await run_in_threadpool(_extract_text_from_upload_bytes, file.filename, contents)
+    except ContractGuardError as exc:
+        logger.warning("Upload parse failed for %s: %s", file.filename, exc)
+        raise to_http_exception(exc) from exc
 
     if not text or not text.strip():
-        raise HTTPException(status_code=400, detail="Could not extract text from contract")
+        raise to_http_exception(EmptyContractTextError(file.filename))
 
-    return _store_contract_and_index(text=text, filename=file.filename)
+    try:
+        if settings.async_indexing_enabled:
+            response = await run_in_threadpool(
+                contract_service.store_contract_without_index,
+                text,
+                file.filename,
+            )
+            await run_in_threadpool(_submit_indexing_job, response.contract_id)
+            return response
+
+        return await run_in_threadpool(
+            contract_service.store_contract_and_index,
+            text,
+            file.filename,
+        )
+    except ContractGuardError as exc:
+        logger.warning("Upload indexing setup failed for %s: %s", file.filename, exc)
+        raise to_http_exception(exc) from exc
 
 
-@app.post("/ingest-text", response_model=UploadResponse)
-def ingest_text(payload: IngestTextRequest) -> UploadResponse:
-    """Ingest plain text directly, without uploading a file."""
+@app.post("/ingest-text", responses={400: {"description": "Invalid text ingest payload"}})
+async def ingest_text(payload: IngestTextRequest) -> UploadResponse:
+    """Ingest plain contract text directly without file upload."""
     raw_text = payload.text.strip()
     if not raw_text:
         raise HTTPException(status_code=400, detail="Text input cannot be empty")
 
     filename = payload.title.strip() or "Pasted Contract Text"
-    return _store_contract_and_index(text=raw_text, filename=filename)
+    try:
+        if settings.async_indexing_enabled:
+            response = await run_in_threadpool(
+                contract_service.store_contract_without_index,
+                raw_text,
+                filename,
+            )
+            await run_in_threadpool(_submit_indexing_job, response.contract_id)
+            return response
+
+        return await run_in_threadpool(
+            contract_service.store_contract_and_index,
+            raw_text,
+            filename,
+        )
+    except ContractGuardError as exc:
+        raise to_http_exception(exc) from exc
 
 
-@app.post("/summary", response_model=SummaryResponse)
-def generate_summary(payload: SummaryRequest) -> SummaryResponse:
-    """Return a very simple heuristic summary for now.
+@app.get("/contracts/{contract_id}/status")
+async def get_contract_status(contract_id: str) -> ContractStatusResponse:
+    _ = _get_contract_text(contract_id)
+    return _contract_status(contract_id)
 
-    This can later be replaced by an LLM-powered summary chain.
-    """
 
+@app.post("/summary")
+async def generate_summary(payload: SummaryRequest) -> SummaryResponse:
+    """Return a lightweight heuristic summary (first N chars)."""
     text = _get_contract_text(payload.contract_id)
-
-    # Naive "summary": first N characters. Replace with LLM later.
-    max_chars = max(100, min(payload.max_chars, 2000))
-    summary = text[:max_chars]
-
-    return SummaryResponse(contract_id=payload.contract_id, summary=summary)
+    max_chars = _clamp_summary_chars(payload.max_chars)
+    return SummaryResponse(contract_id=payload.contract_id, summary=text[:max_chars])
 
 
-@app.post("/risks", response_model=RisksResponse)
-def get_risks(payload: RisksRequest) -> RisksResponse:
-    """Return detected risky clauses + Contract Risk Score.
-
-    Delegates to analyzer.analyze_contract which currently returns a stub
-    structure that can be improved over time.
-    """
-
+@app.post("/risks")
+async def get_risks(payload: RisksRequest) -> RisksResponse:
+    """Return detected risky clauses + Contract Risk Score."""
     text = _get_contract_text(payload.contract_id)
-    result = analyze_contract(text)
+    result = await run_in_threadpool(analyze_contract, text)
 
     safety_score = int(result.get("safety_score", result.get("risk_score", 0)))
     risk_score = int(result.get("risk_score", safety_score))
@@ -281,22 +265,30 @@ def get_risks(payload: RisksRequest) -> RisksResponse:
     )
 
 
-@app.post("/ask", response_model=QAResponse)
-def ask_question(payload: QARequest) -> QAResponse:
-    """Interactive Q&A over a single contract.
-
-    Uses qa_chain.answer_question(question, context_text).
-    """
-
+@app.post("/ask")
+async def ask_question(payload: QARequest) -> QAResponse:
+    """Interactive Q&A over a single contract."""
     _ = _get_contract_text(payload.contract_id)
-    vector_store = _get_or_build_vector_store(payload.contract_id)
 
-    retrieved_chunks = retrieve_relevant_chunks(
-        question=payload.question,
-        vector_store=vector_store,
-        top_k=payload.top_k,
+    if settings.async_indexing_enabled:
+        contract_status = _contract_status(payload.contract_id)
+        if contract_status.status == "processing":
+            raise to_http_exception(IndexingInProgressError(payload.contract_id))
+        if contract_status.status == "failed":
+            raise to_http_exception(IndexingFailedError(payload.contract_id, contract_status.error))
+
+    vector_store = await run_in_threadpool(
+        contract_service.get_or_build_vector_store,
+        payload.contract_id,
     )
-    answer = answer_question(payload.question, retrieved_chunks)
+
+    retrieved_chunks = await run_in_threadpool(
+        retrieve_relevant_chunks,
+        payload.question,
+        vector_store,
+        payload.top_k,
+    )
+    answer = await run_in_threadpool(answer_question, payload.question, retrieved_chunks)
 
     return QAResponse(
         contract_id=payload.contract_id,
@@ -306,17 +298,14 @@ def ask_question(payload: QARequest) -> QAResponse:
     )
 
 
-@app.post("/compare", response_model=CompareResponse)
-def compare(payload: CompareRequest) -> CompareResponse:
-    """Compare two uploaded contracts.
-
-    Uses comparator.compare_contracts(text_a, text_b).
-    """
-
+@app.post("/compare")
+async def compare(payload: CompareRequest) -> CompareResponse:
+    """Compare two uploaded contracts."""
     text_a = _get_contract_text(payload.contract_id_a)
     text_b = _get_contract_text(payload.contract_id_b)
 
-    result = compare_contracts(text_a, text_b) or {}
+    result = await run_in_threadpool(compare_contracts, text_a, text_b)
+    result = result or {}
 
     return CompareResponse(
         contract_id_a=payload.contract_id_a,

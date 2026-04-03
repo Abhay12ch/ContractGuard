@@ -13,8 +13,8 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List
 
-from backend.embedder import chunk_contract_text
-from backend.parser import extract_text_from_file
+from backend.contracts.embedder import chunk_contract_text
+from backend.contracts.parser import extract_text_from_file
 
 SUPPORTED_EXTENSIONS = {".pdf", ".docx", ".txt", ".md", ".csv"}
 SKIP_DIR_NAMES = {".venv", "venv", "__pycache__", ".git", "node_modules"}

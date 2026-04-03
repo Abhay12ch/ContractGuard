@@ -78,6 +78,8 @@ RISK_RULES: Dict[str, dict] = {
     },
 }
 
+__all__ = ["analyze_contract"]
+
 
 def _split_candidate_clauses(text: str) -> List[str]:
     """Split document into sentence-like candidate clauses for scanning."""

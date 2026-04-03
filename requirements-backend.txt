@@ -4,6 +4,6 @@ numpy
 pypdf
 python-docx
 python-multipart
-google-generativeai
+google-genai
 python-dotenv
 requests
