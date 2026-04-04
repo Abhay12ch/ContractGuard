@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List, Literal
+from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel
 
@@ -55,6 +55,7 @@ class QARequest(BaseModel):
     contract_id: str
     question: str
     top_k: int = 4
+    session_id: str = ""
 
 
 class QAResponse(BaseModel):
@@ -62,6 +63,16 @@ class QAResponse(BaseModel):
     question: str
     answer: str
     retrieved_chunks_count: int
+    session_id: str = ""
+
+
+class MetadataRequest(BaseModel):
+    contract_id: str
+
+
+class MetadataResponse(BaseModel):
+    contract_id: str
+    metadata: Dict[str, Any]
 
 
 class CompareRequest(BaseModel):
@@ -76,11 +87,25 @@ class CompareResponse(BaseModel):
     details: dict
 
 
+class ContractListItem(BaseModel):
+    contract_id: str
+    title: str
+    uploaded_at: str
+
+
+class ContractListResponse(BaseModel):
+    contracts: List[ContractListItem]
+
+
 __all__ = [
     "ContractStatusResponse",
+    "ContractListItem",
+    "ContractListResponse",
     "CompareRequest",
     "CompareResponse",
     "IngestTextRequest",
+    "MetadataRequest",
+    "MetadataResponse",
     "QARequest",
     "QAResponse",
     "RisksRequest",

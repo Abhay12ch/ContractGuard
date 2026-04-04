@@ -7,3 +7,4 @@ python-multipart
 google-genai
 python-dotenv
 requests
+motor

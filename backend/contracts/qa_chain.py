@@ -172,7 +172,7 @@ def _generate_with_gemini(question: str, retrieved_chunks: List[str]) -> str:
 
     try:
         client = genai_mod.Client(api_key=api_key)
-        model_name = os.getenv("GEMINI_QA_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+        model_name = os.getenv("GEMINI_QA_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
 
         context = "\n\n".join(
             [f"Clause Chunk {idx + 1}:\n{chunk}" for idx, chunk in enumerate(retrieved_chunks)]

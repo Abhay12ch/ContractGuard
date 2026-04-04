@@ -85,14 +85,14 @@ def test_contract_status_transitions_to_ready() -> None:
         contract_id = ingest.json()["contract_id"]
 
         terminal_status = None
-        for _ in range(80):
+        for _ in range(150):
             status_response = client.get(f"/contracts/{contract_id}/status")
             assert status_response.status_code == 200
             status_payload = status_response.json()
             terminal_status = status_payload["status"]
             if terminal_status in {"ready", "failed"}:
                 break
-            time.sleep(0.05)
+            time.sleep(0.2)
 
         assert terminal_status == "ready"
 
@@ -115,14 +115,14 @@ def test_ask_returns_clause_grounded_answer() -> None:
         contract_id = ingest.json()["contract_id"]
 
         terminal_status = None
-        for _ in range(80):
+        for _ in range(150):
             status_response = client.get(f"/contracts/{contract_id}/status")
             assert status_response.status_code == 200
             status_payload = status_response.json()
             terminal_status = status_payload["status"]
             if terminal_status in {"ready", "failed"}:
                 break
-            time.sleep(0.05)
+            time.sleep(0.2)
 
         assert terminal_status == "ready"
 

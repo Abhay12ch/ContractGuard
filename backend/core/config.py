@@ -94,8 +94,13 @@ class Settings:
         1,
         _to_int(os.getenv("OCR_PDF_MAX_PAGES"), default=25),
     )
+    gemini_model: str = (
+        os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+    )
     summary_min_chars: int = 100
     summary_max_chars: int = _to_int(os.getenv("SUMMARY_MAX_CHARS"), default=2000)
+    mongo_uri: str = os.getenv("MONGO_URI", "mongodb://localhost:27017").strip()
+    mongo_db_name: str = os.getenv("MONGO_DB_NAME", "contractguard").strip()
 
 
 settings = Settings()
