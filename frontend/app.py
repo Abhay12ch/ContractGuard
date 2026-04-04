@@ -27,6 +27,7 @@ LOCAL_MODE_IMPORT_ERROR = ""
 
 try:
     from backend.contracts.analyzer import analyze_contract
+    from backend.contracts.comparator import compare_contracts
     from backend.contracts.embedder import build_faiss_store, chunk_contract_text, retrieve_relevant_chunks
     from backend.contracts.parser import extract_text_from_file
     from backend.contracts.qa_chain import answer_question
@@ -176,18 +177,75 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes / (1024 * 1024):.2f} MB"
 
 
-def _queue_upload_item(filename: str, contract_id: str, size_bytes: int, status: str) -> None:
-    st.session_state.upload_queue.insert(
-        0,
-        {
-            "filename": filename,
-            "contract_id": contract_id,
-            "size_bytes": max(int(size_bytes), 0),
-            "status": status,
-            "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        },
+def _normalize_queue_status(status: str) -> str:
+    value = str(status or "").strip().lower()
+    if value == "ready":
+        return "Completed"
+    if value == "processing":
+        return "Processing"
+    if value == "failed":
+        return "Failed"
+    if value in {"completed", "failed", "processing"}:
+        return value.title()
+    return "Completed"
+
+
+def _status_progress(status_label: str) -> int:
+    normalized = _normalize_queue_status(status_label)
+    if normalized == "Completed":
+        return 100
+    if normalized == "Failed":
+        return 100
+    return 45
+
+
+def _refresh_upload_metrics() -> None:
+    queue = st.session_state.upload_queue
+    st.session_state.processing_count = sum(
+        1 for item in queue if _normalize_queue_status(item.get("status", "")) == "Processing"
     )
+    st.session_state.failed_count = sum(
+        1 for item in queue if _normalize_queue_status(item.get("status", "")) == "Failed"
+    )
+
+
+def _queue_size_for_contract(contract_id: str) -> int:
+    normalized = str(contract_id or "").strip()
+    for item in st.session_state.upload_queue:
+        if str(item.get("contract_id", "")).strip() == normalized:
+            return max(int(item.get("size_bytes", 0)), 0)
+    return 0
+
+
+def _queue_upload_item(filename: str, contract_id: str, size_bytes: int, status: str) -> None:
+    normalized_status = _normalize_queue_status(status)
+    normalized_contract_id = str(contract_id or "").strip()
+    existing_item = None
+
+    if normalized_contract_id and normalized_contract_id != "N/A":
+        for item in st.session_state.upload_queue:
+            if str(item.get("contract_id", "")).strip() == normalized_contract_id:
+                existing_item = item
+                break
+
+    if existing_item is not None:
+        existing_item["filename"] = filename
+        existing_item["size_bytes"] = max(int(size_bytes), 0)
+        existing_item["status"] = normalized_status
+    else:
+        st.session_state.upload_queue.insert(
+            0,
+            {
+                "filename": filename,
+                "contract_id": normalized_contract_id or "N/A",
+                "size_bytes": max(int(size_bytes), 0),
+                "status": normalized_status,
+                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
     st.session_state.upload_queue = st.session_state.upload_queue[:20]
+    _refresh_upload_metrics()
 
 
 def _collect_contract_rows() -> List[Dict[str, Any]]:
@@ -223,11 +281,11 @@ def _collect_contract_rows() -> List[Dict[str, Any]]:
             {
                 "filename": str(filename),
                 "contract_id": str(contract_id),
-                "status": "Completed",
+                "status": _normalize_queue_status(queue_item.get("status", "Completed")),
                 "uploaded": uploaded_display,
                 "uploaded_sort": uploaded_sort,
                 "size_bytes": max(int(queue_item.get("size_bytes", 0)), 0),
-                "progress": 100,
+                "progress": _status_progress(queue_item.get("status", "Completed")),
             }
         )
 
@@ -264,7 +322,7 @@ def _render_contracts_tab() -> None:
     if st.session_state.contracts_show_filters:
         st.selectbox(
             "Status",
-            options=["All", "Completed", "Failed"],
+            options=["All", "Processing", "Completed", "Failed"],
             key="contracts_status_filter",
         )
     st.markdown("</div>", unsafe_allow_html=True)
@@ -297,7 +355,12 @@ def _render_contracts_tab() -> None:
     table_rows_html = []
     for row in filtered_rows:
         status_lower = row["status"].lower()
-        status_class = "failed" if status_lower == "failed" else "completed"
+        if status_lower == "failed":
+            status_class = "failed"
+        elif status_lower == "processing":
+            status_class = "processing"
+        else:
+            status_class = "completed"
         progress_pct = max(0, min(int(row["progress"]), 100))
         table_rows_html.append(
             (
@@ -654,6 +717,7 @@ def _local_store_contract(text: str, filename: str) -> _LocalResponse:
             "embedding_count": int(
                 st.session_state.local_vector_stores[contract_id].get("embedding_count", 0)
             ),
+            "status": "ready",
         },
     )
 
@@ -753,7 +817,70 @@ def _local_post(path: str, **kwargs) -> _LocalResponse:
             },
         )
 
+    if path == "/compare":
+        contract_id_a = str(payload.get("contract_id_a", "")).strip()
+        contract_id_b = str(payload.get("contract_id_b", "")).strip()
+        text_a = st.session_state.local_contract_store.get(contract_id_a)
+        text_b = st.session_state.local_contract_store.get(contract_id_b)
+        if not text_a or not text_b:
+            return _LocalResponse(404, {"detail": "Unknown contract_id. Upload or ingest first."})
+        details = compare_contracts(text_a, text_b)
+        return _LocalResponse(
+            200,
+            {
+                "contract_id_a": contract_id_a,
+                "contract_id_b": contract_id_b,
+                "summary": str(details.get("summary", "Comparison not implemented yet")),
+                "details": details,
+            },
+        )
+
     return _LocalResponse(404, {"detail": f"Unsupported local endpoint: {path}"})
+
+
+def _local_get(path: str, **kwargs) -> _LocalResponse:
+    if not LOCAL_MODE_AVAILABLE:
+        return _LocalResponse(
+            503,
+            {
+                "detail": (
+                    "Remote backend unavailable and local fallback dependencies are missing: "
+                    f"{LOCAL_MODE_IMPORT_ERROR}"
+                )
+            },
+        )
+
+    if path == "/":
+        return _LocalResponse(200, {"message": "ContractGuard backend is running"})
+
+    status_match = re.match(r"^/contracts/([^/]+)/status$", path)
+    if status_match:
+        contract_id = status_match.group(1)
+        text = st.session_state.local_contract_store.get(contract_id)
+        if text is None:
+            return _LocalResponse(404, {"detail": f"Contract '{contract_id}' was not found."})
+
+        vector_store = st.session_state.local_vector_stores.get(contract_id) or {}
+        embedding_count = int(vector_store.get("embedding_count", 0))
+        status_value = "ready" if embedding_count > 0 else "processing"
+        return _LocalResponse(
+            200,
+            {
+                "contract_id": contract_id,
+                "status": status_value,
+                "embedding_count": embedding_count,
+                "error": None,
+            },
+        )
+
+    return _LocalResponse(404, {"detail": f"Unsupported local endpoint: {path}"})
+
+
+def _resolve_runtime_base_url() -> str:
+    parsed = urlparse(API_BASE_URL)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        return API_BASE_URL
+    return DEFAULT_RENDER_BACKEND_URL
 
 
 def _api_post(path: str, **kwargs):
@@ -761,12 +888,7 @@ def _api_post(path: str, **kwargs):
     if RUNNING_ON_RENDER and PREFER_LOCAL_ON_RENDER and LOCAL_MODE_AVAILABLE:
         return _local_post(path, **kwargs)
 
-    parsed = urlparse(API_BASE_URL)
-    base_url = API_BASE_URL
-
-    # Final runtime safety-net for any malformed env at deployment/runtime.
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        base_url = DEFAULT_RENDER_BACKEND_URL
+    base_url = _resolve_runtime_base_url()
 
     # Render free-tier services may return transient 503/timeouts during cold start.
     # Warm the service and retry briefly before surfacing an error to the user.
@@ -803,6 +925,95 @@ def _api_post(path: str, **kwargs):
         raise last_exc
 
     raise RuntimeError("Backend request failed after retries.")
+
+
+def _api_get(path: str, **kwargs):
+    if RUNNING_ON_RENDER and PREFER_LOCAL_ON_RENDER and LOCAL_MODE_AVAILABLE:
+        return _local_get(path, **kwargs)
+
+    base_url = _resolve_runtime_base_url()
+
+    timeout_seconds = kwargs.pop("timeout", 45)
+    attempts = 4
+    delay_seconds = 2
+    last_exc: Exception | None = None
+
+    for attempt in range(1, attempts + 1):
+        try:
+            response = requests.get(f"{base_url}{path}", timeout=timeout_seconds, **kwargs)
+            if response.status_code in {502, 503, 504} and attempt < attempts:
+                time.sleep(delay_seconds)
+                continue
+            return response
+        except requests.RequestException as exc:
+            last_exc = exc
+            if attempt < attempts:
+                time.sleep(delay_seconds)
+                continue
+            if LOCAL_MODE_AVAILABLE:
+                return _local_get(path, **kwargs)
+            raise
+
+    if last_exc is not None:
+        if LOCAL_MODE_AVAILABLE:
+            return _local_get(path, **kwargs)
+        raise last_exc
+
+    raise RuntimeError("Backend request failed after retries.")
+
+
+def _fetch_contract_status(contract_id: str) -> dict | None:
+    normalized = str(contract_id or "").strip()
+    if not normalized:
+        return None
+    try:
+        response = _api_get(f"/contracts/{normalized}/status")
+        response.raise_for_status()
+        payload = response.json()
+        if isinstance(payload, dict):
+            return payload
+    except (requests.RequestException, RuntimeError):
+        return None
+    return None
+
+
+def _wait_for_contract_ready(
+    contract_id: str,
+    *,
+    timeout_seconds: int = 90,
+    poll_interval_seconds: float = 1.25,
+) -> dict | None:
+    deadline = time.time() + timeout_seconds
+    latest_payload: dict | None = None
+
+    while time.time() < deadline:
+        latest_payload = _fetch_contract_status(contract_id)
+        if latest_payload is None:
+            return None
+        status_value = str(latest_payload.get("status", "")).strip().lower()
+        if status_value in {"ready", "failed"}:
+            return latest_payload
+        time.sleep(poll_interval_seconds)
+
+    return latest_payload
+
+
+def _status_value(payload: dict | None) -> str:
+    if not payload:
+        return ""
+    return str(payload.get("status", "")).strip().lower()
+
+
+def _update_queue_status_from_backend(contract_id: str, filename: str, size_bytes: int) -> dict | None:
+    payload = _fetch_contract_status(contract_id)
+    if payload:
+        _queue_upload_item(
+            filename=filename,
+            contract_id=contract_id,
+            size_bytes=size_bytes,
+            status=str(payload.get("status", "processing")),
+        )
+    return payload
 
 
 def _inject_theme() -> None:
@@ -1233,6 +1444,12 @@ def _inject_theme() -> None:
             border-color: rgba(22, 163, 74, 0.35);
         }
 
+        .queue-status.processing {
+            background: rgba(234, 179, 8, 0.14);
+            color: #854d0e;
+            border-color: rgba(234, 179, 8, 0.36);
+        }
+
         .queue-status.failed {
             background: rgba(220, 38, 38, 0.14);
             color: #991b1b;
@@ -1352,6 +1569,12 @@ def _inject_theme() -> None:
         .ct-status.completed {
             background: #1f4560;
             color: #ffffff;
+        }
+
+        .ct-status.processing {
+            background: rgba(234, 179, 8, 0.15);
+            color: #854d0e;
+            border-color: rgba(234, 179, 8, 0.35);
         }
 
         .ct-status.failed {
@@ -2007,6 +2230,7 @@ def _translated_compare_data(compare_data: Dict[str, Any], target_lang: str) -> 
 
 st.set_page_config(page_title="ContractGuard AI", layout="wide")
 _init_state()
+_refresh_upload_metrics()
 _inject_theme()
 
 if not st.session_state.is_authenticated:
@@ -2258,13 +2482,14 @@ if process_file_clicked:
     if uploaded_file is None:
         st.warning("Please upload a contract file first.")
     else:
-        st.session_state.processing_count += 1
         with st.spinner("Uploading and analyzing contract..."):
             try:
+                file_bytes = uploaded_file.getvalue()
+                file_size = int(getattr(uploaded_file, "size", len(file_bytes)))
                 files = {
                     "file": (
                         uploaded_file.name,
-                        uploaded_file.getvalue(),
+                        file_bytes,
                         uploaded_file.type or "application/octet-stream",
                     )
                 }
@@ -2277,6 +2502,12 @@ if process_file_clicked:
                 st.session_state.contract_id = contract_id
                 st.session_state.upload_name = filename
                 _remember_contract(contract_id, filename)
+                _queue_upload_item(
+                    filename=filename,
+                    contract_id=contract_id,
+                    size_bytes=file_size,
+                    status=str(upload_json.get("status", "processing")),
+                )
 
                 risks_resp = _api_post("/risks", json={"contract_id": contract_id})
                 risks_resp.raise_for_status()
@@ -2290,16 +2521,24 @@ if process_file_clicked:
                     st.session_state.risk_data,
                     st.session_state.summary_data,
                 )
-                _queue_upload_item(
-                    filename=filename,
-                    contract_id=contract_id,
-                    size_bytes=int(getattr(uploaded_file, "size", len(uploaded_file.getvalue()))),
-                    status="Completed",
-                )
-
-                st.success("Analysis complete.")
+                status_payload = _update_queue_status_from_backend(contract_id, filename, file_size)
+                status_value = _status_value(status_payload) or str(upload_json.get("status", "")).strip().lower()
+                if status_value == "failed":
+                    error_detail = ""
+                    if status_payload:
+                        error_detail = str(status_payload.get("error", "")).strip()
+                    st.error(
+                        "Analysis generated summary/risk outputs, but indexing failed. "
+                        + (f"Details: {error_detail}" if error_detail else "")
+                    )
+                elif status_value == "processing":
+                    st.info(
+                        "Analysis is available. Contract indexing is still processing, "
+                        "so Q&A may take a moment to become ready."
+                    )
+                else:
+                    st.success("Analysis complete.")
             except (requests.RequestException, RuntimeError) as exc:
-                st.session_state.failed_count += 1
                 _queue_upload_item(
                     filename=getattr(uploaded_file, "name", "Uploaded File"),
                     contract_id="N/A",
@@ -2307,14 +2546,11 @@ if process_file_clicked:
                     status="Failed",
                 )
                 st.error(f"API error: {exc}")
-            finally:
-                st.session_state.processing_count = max(st.session_state.processing_count - 1, 0)
 
 if process_text_clicked:
     if not manual_text.strip():
         st.warning("Please paste contract text first.")
     else:
-        st.session_state.processing_count += 1
         with st.spinner("Analyzing pasted text..."):
             try:
                 ingest_resp = _api_post(
@@ -2326,9 +2562,16 @@ if process_text_clicked:
 
                 contract_id = ingest_json["contract_id"]
                 filename = ingest_json.get("filename", "Pasted Contract Text")
+                text_size = len(manual_text.encode("utf-8"))
                 st.session_state.contract_id = contract_id
                 st.session_state.upload_name = filename
                 _remember_contract(contract_id, filename)
+                _queue_upload_item(
+                    filename=filename,
+                    contract_id=contract_id,
+                    size_bytes=text_size,
+                    status=str(ingest_json.get("status", "processing")),
+                )
 
                 risks_resp = _api_post("/risks", json={"contract_id": contract_id})
                 risks_resp.raise_for_status()
@@ -2342,16 +2585,24 @@ if process_text_clicked:
                     st.session_state.risk_data,
                     st.session_state.summary_data,
                 )
-                _queue_upload_item(
-                    filename=filename,
-                    contract_id=contract_id,
-                    size_bytes=len(manual_text.encode("utf-8")),
-                    status="Completed",
-                )
-
-                st.success("Text analysis complete.")
+                status_payload = _update_queue_status_from_backend(contract_id, filename, text_size)
+                status_value = _status_value(status_payload) or str(ingest_json.get("status", "")).strip().lower()
+                if status_value == "failed":
+                    error_detail = ""
+                    if status_payload:
+                        error_detail = str(status_payload.get("error", "")).strip()
+                    st.error(
+                        "Text analysis generated outputs, but indexing failed. "
+                        + (f"Details: {error_detail}" if error_detail else "")
+                    )
+                elif status_value == "processing":
+                    st.info(
+                        "Text analysis is available. Contract indexing is still processing, "
+                        "so Q&A may take a moment to become ready."
+                    )
+                else:
+                    st.success("Text analysis complete.")
             except (requests.RequestException, RuntimeError) as exc:
-                st.session_state.failed_count += 1
                 _queue_upload_item(
                     filename=manual_title or "Pasted Contract Text",
                     contract_id="N/A",
@@ -2359,8 +2610,6 @@ if process_text_clicked:
                     status="Failed",
                 )
                 st.error(f"API error: {exc}")
-            finally:
-                st.session_state.processing_count = max(st.session_state.processing_count - 1, 0)
 
 queue_items = st.session_state.upload_queue
 st.markdown(
@@ -2379,7 +2628,12 @@ if not queue_items:
 else:
     for item in queue_items[:8]:
         status = str(item.get("status", "Completed")).strip().lower()
-        status_class = "failed" if status == "failed" else "completed"
+        if status == "failed":
+            status_class = "failed"
+        elif status == "processing":
+            status_class = "processing"
+        else:
+            status_class = "completed"
         st.markdown(
             f"""
             <div class="queue-item">
@@ -2486,6 +2740,44 @@ if st.session_state.risk_data and st.session_state.summary_data:
         else:
             with st.spinner("Finding relevant clauses and generating answer..."):
                 try:
+                    active_contract_id = st.session_state.contract_id
+                    queue_size = _queue_size_for_contract(active_contract_id)
+                    status_payload = _update_queue_status_from_backend(
+                        active_contract_id,
+                        st.session_state.upload_name,
+                        queue_size,
+                    )
+                    current_status = _status_value(status_payload)
+
+                    if current_status == "failed":
+                        detail = str((status_payload or {}).get("error", "")).strip()
+                        raise RuntimeError(
+                            "Contract indexing failed, so Q&A is unavailable right now. "
+                            + (f"Details: {detail}" if detail else "")
+                        )
+
+                    if current_status == "processing":
+                        waited_payload = _wait_for_contract_ready(active_contract_id)
+                        if waited_payload is not None:
+                            _queue_upload_item(
+                                filename=st.session_state.upload_name,
+                                contract_id=active_contract_id,
+                                size_bytes=queue_size,
+                                status=str(waited_payload.get("status", "processing")),
+                            )
+                        current_status = _status_value(waited_payload)
+                        if current_status == "failed":
+                            detail = str((waited_payload or {}).get("error", "")).strip()
+                            raise RuntimeError(
+                                "Contract indexing failed, so Q&A is unavailable right now. "
+                                + (f"Details: {detail}" if detail else "")
+                            )
+                        if current_status != "ready":
+                            raise RuntimeError(
+                                "Contract indexing is still in progress. "
+                                "Please retry in a few seconds."
+                            )
+
                     qa_resp = _api_post(
                         "/ask",
                         json={
@@ -2494,6 +2786,24 @@ if st.session_state.risk_data and st.session_state.summary_data:
                             "top_k": 4,
                         },
                     )
+                    if qa_resp.status_code == 409:
+                        waited_payload = _wait_for_contract_ready(st.session_state.contract_id)
+                        if waited_payload is not None:
+                            _queue_upload_item(
+                                filename=st.session_state.upload_name,
+                                contract_id=st.session_state.contract_id,
+                                size_bytes=queue_size,
+                                status=str(waited_payload.get("status", "processing")),
+                            )
+                        if _status_value(waited_payload) == "ready":
+                            qa_resp = _api_post(
+                                "/ask",
+                                json={
+                                    "contract_id": st.session_state.contract_id,
+                                    "question": question.strip(),
+                                    "top_k": 4,
+                                },
+                            )
                     qa_resp.raise_for_status()
                     qa_json = qa_resp.json()
                     st.session_state.qa_answer = qa_json.get("answer", "No answer generated.")
@@ -2511,7 +2821,11 @@ if st.session_state.risk_data and st.session_state.summary_data:
                         unsafe_allow_html=True,
                     )
                 except (requests.RequestException, RuntimeError) as exc:
-                    st.error(f"Q&A error: {exc}")
+                    message = str(exc)
+                    if "still in progress" in message.lower():
+                        st.warning(message)
+                    else:
+                        st.error(f"Q&A error: {message}")
 
     if st.session_state.qa_answer:
         st.markdown("### Answer")
