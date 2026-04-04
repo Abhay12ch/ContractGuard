@@ -38,6 +38,15 @@ def _normalize_log_level(value: str | None, default: str = "INFO") -> str:
     return default
 
 
+def _normalize_url(value: str | None, default: str) -> str:
+    if value is None:
+        return default
+    normalized = value.strip().rstrip("/")
+    if not normalized:
+        return default
+    return normalized
+
+
 @dataclass(frozen=True)
 class Settings:
     app_name: str = "ContractGuard API"
@@ -64,6 +73,26 @@ class Settings:
     upload_max_bytes: int = max(
         1,
         _to_int(os.getenv("UPLOAD_MAX_BYTES"), default=5_242_880),
+    )
+    ocr_enabled: bool = _to_bool(os.getenv("OCR_ENABLED"), default=False)
+    ollama_base_url: str = _normalize_url(
+        os.getenv("OLLAMA_BASE_URL"),
+        default="http://127.0.0.1:11434",
+    )
+    ollama_ocr_model: str = (
+        os.getenv("OLLAMA_OCR_MODEL", "glm-ocr:latest").strip() or "glm-ocr:latest"
+    )
+    ocr_timeout_seconds: int = max(
+        5,
+        _to_int(os.getenv("OCR_TIMEOUT_SECONDS"), default=120),
+    )
+    ocr_pdf_min_chars: int = max(
+        1,
+        _to_int(os.getenv("OCR_PDF_MIN_CHARS"), default=80),
+    )
+    ocr_pdf_max_pages: int = max(
+        1,
+        _to_int(os.getenv("OCR_PDF_MAX_PAGES"), default=25),
     )
     summary_min_chars: int = 100
     summary_max_chars: int = _to_int(os.getenv("SUMMARY_MAX_CHARS"), default=2000)

@@ -71,9 +71,24 @@ class ContractFileNotFoundError(ContractParsingError):
 class UnsupportedContractFormatError(ContractParsingError):
     """Raised when the contract file extension is not supported."""
 
-    def __init__(self, extension: str) -> None:
+    def __init__(
+        self,
+        extension: str,
+        *,
+        supported_formats: tuple[str, ...] | None = None,
+    ) -> None:
         self.extension = extension
-        super().__init__(f"Unsupported file type: {extension}. Only PDF and DOCX files are supported")
+        supported = supported_formats or ("PDF", "DOCX")
+        if len(supported) == 1:
+            supported_text = supported[0]
+        elif len(supported) == 2:
+            supported_text = f"{supported[0]} and {supported[1]}"
+        else:
+            head = ", ".join(supported[:-1])
+            supported_text = f"{head}, and {supported[-1]}"
+        super().__init__(
+            f"Unsupported file type: {extension}. Only {supported_text} files are supported"
+        )
 
 
 class ContractExtractionError(ContractParsingError):

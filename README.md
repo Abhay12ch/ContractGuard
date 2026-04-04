@@ -12,6 +12,7 @@ AI-powered contract analysis system for summaries, risky clause detection, contr
 
 ### Phase 2 — Document Ingestion
 - Implement PDF parsing with **PyPDF (pypdf)** and DOCX parsing with **python-docx** in `backend/contracts/parser.py`.
+- Add optional OCR fallback for scanned PDFs and image uploads via local Ollama (`glm-ocr`).
 - Add text chunking and preprocessing for long contracts.
 
 ### Phase 3 — Embeddings & Vector Store
@@ -93,6 +94,12 @@ ContractGuard/
    ```
    Then fill in `GEMINI_API_KEY` if you want Gemini-powered answers.
    By default, embeddings use `EMBEDDING_PROVIDER=auto` (Gemini when available, local fallback otherwise).
+   For scanned PDFs/images, enable OCR in `.env`:
+   ```bash
+   OCR_ENABLED=true
+   OLLAMA_BASE_URL=http://127.0.0.1:11434
+   OLLAMA_OCR_MODEL=glm-ocr:latest
+   ```
 3. Run backend (dev):
    ```bash
    uvicorn backend.main:app --reload
@@ -106,6 +113,15 @@ ContractGuard/
    pip install -r requirements-dev.txt
    pytest
    ```
+
+### Optional: Ollama OCR setup (for scanned PDFs and images)
+
+```bash
+ollama pull glm-ocr:latest
+ollama serve
+```
+
+The backend first uses native PDF/DOCX extraction. If PDF text is too sparse and OCR is enabled, it falls back to OCR from embedded PDF page images.
 
 ---
 
@@ -128,7 +144,7 @@ This repository includes `render.yaml`, so you can deploy directly from GitHub u
 
 ### Notes
 
-- The app supports PDF and DOCX uploads.
+- The app supports PDF and DOCX uploads, plus PNG/JPG/JPEG/WEBP when `OCR_ENABLED=true`.
 - Uploads are strictly validated by size, content-type, and file signature.
 - Indexing runs asynchronously with status tracking.
 - Data is still stored in memory, so uploaded contracts reset on service restart.

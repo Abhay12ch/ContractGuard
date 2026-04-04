@@ -2450,12 +2450,15 @@ with tab_upload:
         <div style="text-align:center;border:2px dashed rgba(236, 72, 153, 0.35);border-radius:12px;padding:2rem 1rem;background:rgba(252, 245, 250, 0.55);margin-bottom:0.65rem;">
             <div style="font-size:2rem;line-height:1;">📄</div>
             <div style="margin-top:0.45rem;font-weight:800;color:#2b3f52;">Drag &amp; drop contracts or click to browse</div>
-            <div style="margin-top:0.22rem;color:#6a7682;font-size:0.9rem;">Supports PDF files up to 50MB</div>
+            <div style="margin-top:0.22rem;color:#6a7682;font-size:0.9rem;">Supports PDF, DOCX, PNG, JPG, JPEG, and WEBP files up to 50MB</div>
         </div>
         """,
         unsafe_allow_html=True,
     )
-    uploaded_file = st.file_uploader("Choose Files", type=["pdf", "docx"])
+    uploaded_file = st.file_uploader(
+        "Choose Files",
+        type=["pdf", "docx", "png", "jpg", "jpeg", "webp"],
+    )
     process_file_clicked = st.button("Process Uploaded Contract", type="primary", use_container_width=True)
 
 with tab_text:

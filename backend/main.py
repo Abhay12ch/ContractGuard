@@ -1,7 +1,7 @@
 """FastAPI entrypoint for ContractGuard.
 
 API surface:
-- POST /upload   : upload a contract (PDF/DOCX), returns contract_id
+- POST /upload   : upload a contract (PDF/DOCX, or image when OCR enabled)
 - POST /summary  : get plain-language summary
 - POST /risks    : get risky clauses + risk score
 - POST /ask      : ask a question about a contract
@@ -61,6 +61,13 @@ logger = logging.getLogger("contractguard.api")
 @asynccontextmanager
 async def _lifespan(_app: FastAPI):
     """Application lifespan hooks for startup/shutdown tasks."""
+    if settings.ocr_enabled:
+        logger.info(
+            "OCR enabled via Ollama model=%s at %s",
+            settings.ollama_ocr_model,
+            settings.ollama_base_url,
+        )
+
     if settings.async_indexing_enabled:
         indexing_queue.start()
 
@@ -160,7 +167,7 @@ def root() -> dict:
 
 @app.post("/upload", responses={400: {"description": "Invalid file upload request"}})
 async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadResponse:
-    """Upload a contract file (PDF/DOCX) and return a contract_id."""
+    """Upload a contract file and return a contract_id."""
     if not file.filename:
         raise HTTPException(status_code=400, detail="No filename provided")
 
@@ -173,6 +180,7 @@ async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadRespo
             content_type=file.content_type,
             contents=contents,
             max_bytes=settings.upload_max_bytes,
+            allow_images=settings.ocr_enabled,
         )
         text = await run_in_threadpool(_extract_text_from_upload_bytes, file.filename, contents)
     except ContractGuardError as exc:
