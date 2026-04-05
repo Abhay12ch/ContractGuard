@@ -1,7 +1,0 @@
-streamlit
-requests
-python-dotenv
-numpy
-pypdf
-python-docx
-fpdf2

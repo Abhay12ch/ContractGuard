@@ -26,9 +26,6 @@ Thumbs.db
 *.log
 logs/
 
-# Streamlit
-.streamlit/
-
 # FAISS / embeddings / cache
 *.faiss
 *.pkl
@@ -36,7 +33,11 @@ cache/
 models/
 data/train/
 
-# Node / frontend (if added later)
+# Node / frontend
 node_modules/
+dist/
 .dist/
 .build/
+
+# Test output
+test_out.txt

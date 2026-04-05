@@ -7,6 +7,6 @@ python-docx
 python-multipart
 google-genai
 python-dotenv
-streamlit
-fpdf2
+motor
 httpx
+fpdf2

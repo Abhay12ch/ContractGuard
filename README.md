@@ -1,150 +1,125 @@
 # ContractGuard AI
 
-AI-powered contract analysis system for summaries, risky clause detection, contract risk scoring, interactive Q&A, and contract comparison.
+> AI-powered contract analysis platform with risk detection, vendor verification, metadata extraction, and interactive Q&A.
 
----
+## Features
 
-## 1. Roadmap
+| Layer | What It Does | Tech |
+|-------|-------------|------|
+| **Contract Analysis** | AI-generated summary, risk scoring, clause detection | Gemini 2.5 Pro |
+| **Risk Detection** | ISO 31000-compliant scoring with dual Risk/Safety scores | Deterministic rules engine |
+| **Vendor Verification** | Know-Your-Business (KYB) assessment of contract vendors | Gemini AI assessment |
+| **Metadata Extraction** | Parties, dates, financial terms, governing law | Structured AI extraction |
+| **Digital Signatures** | Zoho Sign integration for signature verification | Zoho Sign API (OAuth 2.0) |
+| **Interactive Q&A** | Ask questions about any uploaded contract | RAG + vector search |
+| **Contract Comparison** | Side-by-side analysis of two contracts | AI-powered diff |
 
-### Phase 1 — Setup
-- Initialize Python environment and install dependencies from `requirements.txt`.
-- Configure LLM API key (Gemini or OpenAI) via `.env`.
+## Architecture
 
-### Phase 2 — Document Ingestion
-- Implement PDF parsing with **PyPDF (pypdf)** and DOCX parsing with **python-docx** in `backend/contracts/parser.py`.
-- Add optional OCR fallback for scanned PDFs and image uploads via local Ollama (`glm-ocr`).
-- Add text chunking and preprocessing for long contracts.
-
-### Phase 3 — Embeddings & Vector Store
-- Implement embeddings + FAISS index in `backend/contracts/embedder.py`.
-- Store contract chunks and provide retrieval utilities.
-
-### Phase 4 — Core AI Features
-- Plain-language summary generation.
-- Risky clause detection (penalties, liability, non-compete, termination, auto-renewal).
-- Contract Risk Score (0–100) computation in `backend/contracts/analyzer.py`.
-- Interactive Q&A over a contract using retrieval + LLM in `backend/contracts/qa_chain.py`.
-
-### Phase 5 — Contract Comparison
-- Implement comparison logic in `backend/contracts/comparator.py`.
-- Highlight better/worse terms between two contracts.
-
-### Phase 6 — API & Frontend
-- Expose FastAPI endpoints in `backend/main.py`:
-   - `/upload`, `/ingest-text`, `/contracts/{contract_id}/status`, `/summary`, `/risks`, `/ask`, `/compare`.
-- Build Streamlit UI in `frontend/app.py`:
-  - Upload contract, show summary, risk score, risky clauses, Q&A, and comparison view.
-
-### Phase 7 — (Optional) Knowledge Graph
-- Extract clause relationships and visualize a Clause Knowledge Graph.
-
----
-
-## 2. Project Structure
-
-```text
-ContractGuard/
-├── ContractGuard_Hackathon_Brief.pdf   # Hackathon problem statement
-├── README.md                           # Roadmap and structure (this file)
-├── requirements.txt                    # Python dependencies
-├── requirements-dev.txt                # Dev/testing dependencies
-├── .env.example                        # Environment variable template
-├── pytest.ini                          # Pytest configuration
-├── backend/
-│   ├── main.py                         # FastAPI entrypoint
-│   ├── api/
-│   │   ├── errors.py                   # Domain exception -> HTTP mapping
-│   │   └── schemas.py                  # API request/response contracts
-│   ├── core/
-│   │   ├── config.py                   # Environment-driven backend settings
-│   │   └── exceptions.py               # Domain-specific exception hierarchy
-│   ├── contracts/
-│   │   ├── analyzer.py                 # Risk detection + Contract Risk Score
-│   │   ├── comparator.py               # Contract comparison logic
-│   │   ├── embedder.py                 # Embeddings + FAISS vector store
-│   │   ├── parser.py                   # PDF/DOCX text extraction
-│   │   ├── qa_chain.py                 # Retrieval-based Q&A over contracts
-│   │   ├── services.py                 # Contract orchestration service layer
-│   │   └── store.py                    # Thread-safe in-memory contract storage
-│   ├── ingestion/
-│   │   ├── queue.py                    # Background indexing worker queue
-│   │   └── upload_validation.py        # Upload hardening (size/type/signature)
-│   └── training/
-│       └── build_training_corpus.py    # Retriever corpus builder utilities
-├── frontend/
-│   └── app.py                          # Streamlit UI
-├── tests/
-│   ├── test_api_smoke.py               # Backend API + async ingestion tests
-│   └── test_embedder_provider.py       # Embedding provider behavior tests
-└── datasets/
-   └── (sample datasets/corpus)
+```
+┌─────────────────────────────────┐
+│   React/Vite Frontend (5173)    │
+│   TailwindCSS + Material Icons  │
+└──────────────┬──────────────────┘
+               │ REST API
+┌──────────────▼──────────────────┐
+│   FastAPI Backend (8000)        │
+│   ┌───────────────────────────┐ │
+│   │ Gemini AI (Summarizer,    │ │
+│   │ Analyzer, Metadata, QA,   │ │
+│   │ Vendor Verifier)          │ │
+│   ├───────────────────────────┤ │
+│   │ Zoho Sign (OAuth 2.0)    │ │
+│   ├───────────────────────────┤ │
+│   │ FAISS Vector Store        │ │
+│   ├───────────────────────────┤ │
+│   │ MongoDB (persistent store)│ │
+│   └───────────────────────────┘ │
+└─────────────────────────────────┘
 ```
 
----
+## Quick Start
 
-## 3. Quick Start
+### Prerequisites
+- Python 3.11+
+- Node.js 18+
+- MongoDB (cloud or local)
 
-1. Install dependencies:
-   ```bash
-   pip install -r requirements.txt
-   ```
-2. Configure environment:
-   ```bash
-   cp .env.example .env
-   ```
-   Then fill in `GEMINI_API_KEY` if you want Gemini-powered answers.
-   By default, embeddings use `EMBEDDING_PROVIDER=auto` (Gemini when available, local fallback otherwise).
-   For scanned PDFs/images, enable OCR in `.env`:
-   ```bash
-   OCR_ENABLED=true
-   OLLAMA_BASE_URL=http://127.0.0.1:11434
-   OLLAMA_OCR_MODEL=glm-ocr:latest
-   ```
-3. Run backend (dev):
-   ```bash
-   uvicorn backend.main:app --reload
-   ```
-4. Run frontend:
-   ```bash
-   streamlit run frontend/app.py
-   ```
-5. (Optional) Run smoke tests:
-   ```bash
-   pip install -r requirements-dev.txt
-   pytest
-   ```
-
-### Optional: Ollama OCR setup (for scanned PDFs and images)
-
+### 1. Backend Setup
 ```bash
-ollama pull glm-ocr:latest
-ollama serve
+pip install -r requirements.txt
+
+# Set environment variables in .env
+# Required: GEMINI_API_KEY, MONGO_URI, MONGO_DB_NAME
+
+python -m uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
 ```
 
-The backend first uses native PDF/DOCX extraction. If PDF text is too sparse and OCR is enabled, it falls back to OCR from embedded PDF page images.
+### 2. Frontend Setup
+```bash
+cd frontend-ui
+npm install
+npm run dev
+```
 
----
+Open http://localhost:5173 in your browser.
 
-## 4. Deploy On Render (GitHub Blueprint)
+## Environment Variables
 
-This repository includes `render.yaml`, so you can deploy directly from GitHub using Render Blueprint.
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `GEMINI_API_KEY` | ✅ | Google AI API key |
+| `GEMINI_MODEL` | | Model name (default: `gemini-2.5-pro`) |
+| `MONGO_URI` | ✅ | MongoDB connection string |
+| `MONGO_DB_NAME` | ✅ | Database name |
+| `ZOHO_CLIENT_ID` | | Zoho Sign OAuth client ID |
+| `ZOHO_CLIENT_SECRET` | | Zoho Sign OAuth client secret |
+| `ZOHO_REFRESH_TOKEN` | | Zoho Sign refresh token |
+| `ZOHO_API_DOMAIN` | | `https://sign.zoho.in` or `.com` |
 
-1. Push this project to GitHub.
-2. In Render, click **New +** -> **Blueprint**.
-3. Connect your GitHub repo and select this repository.
-4. Render will detect `render.yaml` and create two services:
-   - `contractguard-backend` (FastAPI)
-   - `contractguard-frontend` (Streamlit)
-5. After services are created, set environment variables in Render:
-   - Backend service:
-     - `GEMINI_API_KEY` (required for Gemini-powered answers)
-   - Frontend service:
-     - `API_BASE_URL` = your deployed backend URL, for example: `https://contractguard-backend.onrender.com`
-6. Redeploy the frontend after setting `API_BASE_URL`.
+## API Endpoints
 
-### Notes
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/upload` | Upload contract (PDF/DOCX) |
+| POST | `/ingest-text` | Ingest plain text contract |
+| POST | `/summary` | AI-generated summary |
+| POST | `/risks` | Risk analysis + safety score |
+| POST | `/extract-metadata` | Structured metadata extraction |
+| POST | `/verify-vendor` | Vendor KYB verification |
+| POST | `/verify-signature` | Zoho Sign verification |
+| POST | `/audit-trail` | Zoho Sign audit trail |
+| POST | `/ask` | Interactive Q&A |
+| POST | `/compare` | Compare two contracts |
+| GET | `/contracts` | List all contracts |
+| DELETE | `/contracts/{id}` | Delete a contract |
+| POST | `/clear` | Clear all data |
 
-- The app supports PDF and DOCX uploads, plus PNG/JPG/JPEG/WEBP when `OCR_ENABLED=true`.
-- Uploads are strictly validated by size, content-type, and file signature.
-- Indexing runs asynchronously with status tracking.
-- Data is still stored in memory, so uploaded contracts reset on service restart.
+## Scoring System
+
+### Risk Score (0–100)
+Deterministic, ISO 31000/NIST 800-30 compliant: `Σ(impact × severity_weight)`
+
+### Safety Score (0–100)
+`100 - risk_score`
+
+### Trust Score (0–100)
+Vendor verification based on 5 weighted checks:
+- Company Recognition (25 pts)
+- Active Status (25 pts)
+- Timeline Consistency (20 pts)
+- Name Consistency (15 pts)
+- Jurisdiction Alignment (15 pts)
+
+## Tech Stack
+
+- **Frontend**: React 19, Vite, TailwindCSS, TanStack Query
+- **Backend**: Python, FastAPI, Uvicorn
+- **AI**: Google Gemini 2.5 Pro
+- **Database**: MongoDB Atlas (via Motor async driver)
+- **Vector Search**: FAISS + Sentence Transformers
+- **Signatures**: Zoho Sign API (OAuth 2.0)
+
+## License
+
+MIT
