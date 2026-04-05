@@ -90,11 +90,46 @@ class CompareResponse(BaseModel):
 class ContractListItem(BaseModel):
     contract_id: str
     title: str
-    uploaded_at: str
+    uploaded_at: str = ""
 
 
 class ContractListResponse(BaseModel):
     contracts: List[ContractListItem]
+
+
+class VendorVerifyRequest(BaseModel):
+    contract_id: str
+
+
+class VendorVerifyResponse(BaseModel):
+    contract_id: str
+    vendor_name: str
+    trust_score: int
+    trust_level: str
+    verification_mode: str
+    registry_data: Dict[str, Any]
+    red_flags: List[str]
+    checks: List[Dict[str, Any]]
+    overall_assessment: str = ""
+
+
+class ZohoSignatureRequest(BaseModel):
+    request_id: str
+
+
+class ZohoSignatureResponse(BaseModel):
+    zohoStatus: str
+    isFullySigned: bool
+    signers: List[Dict[str, Any]]
+    completedAt: str | None = None
+    expiresAt: str | None = None
+    documentName: str | None = None
+    auditTrailAvailable: bool = False
+
+
+class ZohoAuditTrailResponse(BaseModel):
+    request_id: str
+    events: List[Dict[str, Any]]
 
 
 __all__ = [
@@ -113,4 +148,9 @@ __all__ = [
     "SummaryRequest",
     "SummaryResponse",
     "UploadResponse",
+    "VendorVerifyRequest",
+    "VendorVerifyResponse",
+    "ZohoSignatureRequest",
+    "ZohoSignatureResponse",
+    "ZohoAuditTrailResponse",
 ]

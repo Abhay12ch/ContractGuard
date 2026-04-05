@@ -9,3 +9,4 @@ google-genai
 python-dotenv
 streamlit
 fpdf2
+httpx

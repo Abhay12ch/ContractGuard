@@ -11,10 +11,11 @@ API surface:
 from __future__ import annotations
 
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 import logging
 import tempfile
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any, Dict
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +38,11 @@ from .api.schemas import (
     SummaryRequest,
     SummaryResponse,
     UploadResponse,
+    VendorVerifyRequest,
+    VendorVerifyResponse,
+    ZohoSignatureRequest,
+    ZohoSignatureResponse,
+    ZohoAuditTrailResponse,
 )
 from .contracts.analyzer import analyze_contract
 from .contracts.chat_engine import generate_answer as chat_generate_answer, is_available as chat_engine_available
@@ -48,6 +54,8 @@ from .contracts.qa_chain import answer_question
 from .contracts.services import ContractService
 from .contracts.session_manager import generate_session_id
 from .contracts.summarizer import summarize_contract
+from .contracts.vendor_verifier import verify_vendor
+from .contracts.zoho_sign import zoho_configured, verify_signature as zoho_verify_signature, get_audit_trail as zoho_get_audit_trail
 
 from .contracts.store import MongoContractStore
 from .core.config import settings
@@ -76,6 +84,18 @@ indexing_queue = IndexingJobQueue(
     contract_service,
     max_size=settings.indexing_queue_max_size,
 )
+
+# ── In-memory cache (eliminates MongoDB round-trips for cached data) ────
+_mem_cache: Dict[str, Dict[str, Any]] = {}
+# Structure: { contract_id: { "text": str, "filename": str, "summary": {max_chars: str}, "risks": dict, "metadata": dict, "vector_store": dict } }
+
+def _cache_get(contract_id: str, key: str) -> Any:
+    return _mem_cache.get(contract_id, {}).get(key)
+
+def _cache_set(contract_id: str, key: str, value: Any) -> None:
+    if contract_id not in _mem_cache:
+        _mem_cache[contract_id] = {}
+    _mem_cache[contract_id][key] = value
 
 
 @asynccontextmanager
@@ -131,11 +151,41 @@ app.add_middleware(
 async def list_contracts():
     """List all contracts available in the database."""
     try:
-        contracts = await store.list_all_contracts()
-        return ContractListResponse(contracts=contracts)
+        # Build list from memory cache first (instant)
+        mem_contracts: list[ContractListItem] = []
+        for cid, data in _mem_cache.items():
+            if "text" in data:
+                mem_contracts.append(
+                    ContractListItem(
+                        contract_id=cid,
+                        title=data.get("filename", "Untitled"),
+                        uploaded_at=data.get("uploaded_at") or "",
+                    )
+                )
+        if mem_contracts:
+            # Also try MongoDB for contracts not in memory, but don't block if it fails
+            try:
+                db_rows = await store.list_all_contracts()
+                mem_ids = {c.contract_id for c in mem_contracts}
+                for row in db_rows:
+                    rid = row["contract_id"] if isinstance(row, dict) else row.contract_id
+                    if rid not in mem_ids:
+                        if isinstance(row, dict):
+                            mem_contracts.append(ContractListItem(**row))
+                        else:
+                            mem_contracts.append(row)
+            except Exception:
+                pass  # MongoDB unreachable, just use memory
+            return ContractListResponse(contracts=mem_contracts)
+
+        # No memory cache, fall back to MongoDB
+        db_rows = await store.list_all_contracts()
+        items = [ContractListItem(**r) if isinstance(r, dict) else r for r in db_rows]
+        return ContractListResponse(contracts=items)
     except Exception as exc:
-        logger.exception("Failed to list contracts")
-        raise HTTPException(status_code=500, detail=str(exc))
+        logger.exception("Failed to list contracts: %s", exc)
+        # Return empty instead of 500 when MongoDB is down
+        return ContractListResponse(contracts=[])
 
 
 def _cleanup_temp_file(tmp_path: Path) -> None:
@@ -146,8 +196,14 @@ def _cleanup_temp_file(tmp_path: Path) -> None:
 
 
 async def _get_contract_text(contract_id: str) -> str:
+    # Try in-memory cache first (instant, no MongoDB)
+    cached_text = _cache_get(contract_id, "text")
+    if cached_text:
+        return cached_text
     try:
-        return await contract_service.require_contract_text(contract_id)
+        text = await contract_service.require_contract_text(contract_id)
+        _cache_set(contract_id, "text", text)  # Cache for future
+        return text
     except ContractNotFoundError as exc:
         raise to_http_exception(exc) from exc
 
@@ -171,18 +227,35 @@ async def _contract_status(contract_id: str) -> ContractStatusResponse:
             error=status_record.error,
         )
 
-    # Note: For accurate FAISS status, checking the Mongo chunk lengths
-    doc = await store.get_contract_data(contract_id)
-    vector_store_embedding_count = doc.get("dimension", 0) if doc else 0
-    chunks = doc.get("chunks", []) if doc else []
-    embedding_count = len(chunks) if chunks else 0
-    status = "ready" if embedding_count > 0 else "processing"
-    return ContractStatusResponse(
-        contract_id=contract_id,
-        status=status,
-        embedding_count=embedding_count,
-        error=None,
-    )
+    # If contract is in memory, it's ready
+    if _cache_get(contract_id, "text"):
+        return ContractStatusResponse(
+            contract_id=contract_id,
+            status="ready",
+            embedding_count=0,
+            error=None,
+        )
+
+    # Fall back to MongoDB
+    try:
+        doc = await store.get_contract_data(contract_id)
+        chunks = doc.get("chunks", []) if doc else []
+        embedding_count = len(chunks) if chunks else 0
+        status = "ready" if embedding_count > 0 else "processing"
+        return ContractStatusResponse(
+            contract_id=contract_id,
+            status=status,
+            embedding_count=embedding_count,
+            error=None,
+        )
+    except Exception:
+        # MongoDB unreachable but contract is known
+        return ContractStatusResponse(
+            contract_id=contract_id,
+            status="ready",
+            embedding_count=0,
+            error=None,
+        )
 
 
 def _extract_text_from_upload_bytes(filename: str, contents: bytes) -> str:
@@ -234,9 +307,14 @@ async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadRespo
         if settings.async_indexing_enabled:
             response = await contract_service.store_contract_without_index(text, file.filename)
             await run_in_threadpool(_submit_indexing_job, response.contract_id)
-            return response
+        else:
+            response = await contract_service.store_contract_and_index(text, file.filename)
 
-        return await contract_service.store_contract_and_index(text, file.filename)
+        # Seed in-memory cache immediately so subsequent calls are instant
+        _cache_set(response.contract_id, "text", text)
+        _cache_set(response.contract_id, "filename", file.filename)
+        _cache_set(response.contract_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+        return response
     except ContractGuardError as exc:
         logger.warning("Upload indexing setup failed for %s: %s", file.filename, exc)
         raise to_http_exception(exc) from exc
@@ -254,9 +332,14 @@ async def ingest_text(payload: IngestTextRequest) -> UploadResponse:
         if settings.async_indexing_enabled:
             response = await contract_service.store_contract_without_index(raw_text, filename)
             await run_in_threadpool(_submit_indexing_job, response.contract_id)
-            return response
+        else:
+            response = await contract_service.store_contract_and_index(raw_text, filename)
 
-        return await contract_service.store_contract_and_index(raw_text, filename)
+        # Seed in-memory cache
+        _cache_set(response.contract_id, "text", raw_text)
+        _cache_set(response.contract_id, "filename", filename)
+        _cache_set(response.contract_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+        return response
     except ContractGuardError as exc:
         raise to_http_exception(exc) from exc
 
@@ -272,14 +355,29 @@ async def generate_summary(payload: SummaryRequest) -> SummaryResponse:
     """Return an AI-generated plain-language summary of the contract."""
     text = await _get_contract_text(payload.contract_id)
     max_chars = _clamp_summary_chars(payload.max_chars)
-    
-    # Try Mongo Cache first
-    cached_summary = await store.get_summary(payload.contract_id, max_chars)
-    if cached_summary:
-        return SummaryResponse(contract_id=payload.contract_id, summary=cached_summary)
-        
+
+    # 1. Try in-memory cache (instant)
+    cache_key = f"summary_{max_chars}"
+    cached = _cache_get(payload.contract_id, cache_key)
+    if cached:
+        return SummaryResponse(contract_id=payload.contract_id, summary=cached)
+
+    # 2. Try MongoDB cache
+    try:
+        cached_summary = await store.get_summary(payload.contract_id, max_chars)
+        if cached_summary:
+            _cache_set(payload.contract_id, cache_key, cached_summary)
+            return SummaryResponse(contract_id=payload.contract_id, summary=cached_summary)
+    except Exception:
+        pass  # MongoDB unreachable, skip
+
+    # 3. Compute fresh
     summary = await run_in_threadpool(summarize_contract, text, max_chars=max_chars)
-    await store.set_summary(payload.contract_id, max_chars, summary)
+    _cache_set(payload.contract_id, cache_key, summary)
+    try:
+        await store.set_summary(payload.contract_id, max_chars, summary)
+    except Exception:
+        pass  # Save to MongoDB best-effort
     return SummaryResponse(contract_id=payload.contract_id, summary=summary)
 
 
@@ -287,14 +385,28 @@ async def generate_summary(payload: SummaryRequest) -> SummaryResponse:
 async def get_risks(payload: RisksRequest) -> RisksResponse:
     """Return detected risky clauses + Contract Risk Score."""
     text = await _get_contract_text(payload.contract_id)
-    
-    # Try Mongo Cache first
-    cached_risks = await store.get_risks(payload.contract_id)
-    result = cached_risks
-    
-    if not result:
-        result = await run_in_threadpool(analyze_contract, text)
-        await store.set_risks(payload.contract_id, result)
+
+    # 1. Try in-memory cache (instant)
+    cached = _cache_get(payload.contract_id, "risks")
+    if cached:
+        result = cached
+    else:
+        # 2. Try MongoDB cache
+        result = None
+        try:
+            result = await store.get_risks(payload.contract_id)
+        except Exception:
+            pass  # MongoDB unreachable
+
+        # 3. Compute fresh
+        if not result:
+            result = await run_in_threadpool(analyze_contract, text)
+            try:
+                await store.set_risks(payload.contract_id, result)
+            except Exception:
+                pass
+
+        _cache_set(payload.contract_id, "risks", result)
 
     safety_score = int(result.get("safety_score", result.get("risk_score", 0)))
     risk_score = int(result.get("risk_score", safety_score))
@@ -317,13 +429,27 @@ async def extract_metadata(payload: MetadataRequest) -> MetadataResponse:
     """Extract structured metadata (parties, dates, payment terms, etc.) from a contract."""
     text = await _get_contract_text(payload.contract_id)
 
-    # Try MongoDB cache first
-    cached = await store.get_metadata(payload.contract_id)
-    if cached:
-        return MetadataResponse(contract_id=payload.contract_id, metadata=cached)
+    # 1. Try in-memory cache (instant)
+    cached_mem = _cache_get(payload.contract_id, "metadata")
+    if cached_mem:
+        return MetadataResponse(contract_id=payload.contract_id, metadata=cached_mem)
 
+    # 2. Try MongoDB cache
+    try:
+        cached = await store.get_metadata(payload.contract_id)
+        if cached:
+            _cache_set(payload.contract_id, "metadata", cached)
+            return MetadataResponse(contract_id=payload.contract_id, metadata=cached)
+    except Exception:
+        pass
+
+    # 3. Compute fresh
     metadata = await run_in_threadpool(extract_contract_metadata, text)
-    await store.set_metadata(payload.contract_id, metadata)
+    _cache_set(payload.contract_id, "metadata", metadata)
+    try:
+        await store.set_metadata(payload.contract_id, metadata)
+    except Exception:
+        pass
     return MetadataResponse(contract_id=payload.contract_id, metadata=metadata)
 
 
@@ -339,13 +465,22 @@ async def ask_question(payload: QARequest) -> QAResponse:
         if contract_status.status == "failed":
             raise to_http_exception(IndexingFailedError(payload.contract_id, contract_status.error))
 
-    vector_store = await contract_service.get_or_build_vector_store(payload.contract_id)
+    # Use cached vector store or build + cache it
+    vector_store = _cache_get(payload.contract_id, "vector_store")
+    if not vector_store:
+        vector_store = await contract_service.get_or_build_vector_store(payload.contract_id)
+        _cache_set(payload.contract_id, "vector_store", vector_store)
 
     # Determine session_id — generate if not provided
     session_id = payload.session_id or generate_session_id(payload.contract_id)
 
-    # Load conversation history from MongoDB for context
-    chat_history = await store.get_chat_history(payload.contract_id, session_id)
+    # Load conversation history — try memory first, then MongoDB
+    chat_history = _cache_get(payload.contract_id, f"chat_{session_id}") or []
+    if not chat_history:
+        try:
+            chat_history = await store.get_chat_history(payload.contract_id, session_id)
+        except Exception:
+            chat_history = []
 
     # Retrieve relevant chunks
     retrieved_chunks = await run_in_threadpool(
@@ -367,10 +502,17 @@ async def ask_question(payload: QARequest) -> QAResponse:
     if not answer:
         answer = await run_in_threadpool(answer_question, payload.question, retrieved_chunks)
 
-    # Store interaction scoped to session
-    await store.append_chat_interaction(
-        payload.contract_id, payload.question, answer, session_id
-    )
+    # Store interaction scoped to session — memory + MongoDB
+    if not chat_history:
+        chat_history = []
+    chat_history.append({"question": payload.question, "answer": answer})
+    _cache_set(payload.contract_id, f"chat_{session_id}", chat_history)
+    try:
+        await store.append_chat_interaction(
+            payload.contract_id, payload.question, answer, session_id
+        )
+    except Exception:
+        pass  # MongoDB best-effort
 
     return QAResponse(
         contract_id=payload.contract_id,
@@ -397,9 +539,130 @@ async def compare(payload: CompareRequest) -> CompareResponse:
         details=result,
     )
 
+@app.post("/verify-vendor")
+async def vendor_verify(payload: VendorVerifyRequest) -> VendorVerifyResponse:
+    """Verify the vendor named in a contract using AI assessment."""
+    text = await _get_contract_text(payload.contract_id)
+
+    # 1. Try in-memory cache
+    cached_mem = _cache_get(payload.contract_id, "vendor_verification")
+    if cached_mem:
+        return VendorVerifyResponse(contract_id=payload.contract_id, **cached_mem)
+
+    # 2. Try MongoDB cache
+    try:
+        cached = await store.get_vendor_verification(payload.contract_id)
+        if cached:
+            _cache_set(payload.contract_id, "vendor_verification", cached)
+            return VendorVerifyResponse(contract_id=payload.contract_id, **cached)
+    except Exception:
+        pass
+
+    # 3. Get metadata first (reuse existing extraction)
+    meta_cached = _cache_get(payload.contract_id, "metadata")
+    if not meta_cached:
+        try:
+            meta_cached = await store.get_metadata(payload.contract_id)
+        except Exception:
+            pass
+    if not meta_cached:
+        from .contracts.metadata_extractor import extract_contract_metadata
+        meta_cached = await run_in_threadpool(extract_contract_metadata, text)
+        _cache_set(payload.contract_id, "metadata", meta_cached)
+
+    # Extract vendor info from metadata
+    vendor_name = meta_cached.get("vendor_name", {}).get("value", "") if isinstance(meta_cached.get("vendor_name"), dict) else ""
+    customer_name = meta_cached.get("customer_name", {}).get("value", "") if isinstance(meta_cached.get("customer_name"), dict) else ""
+    contract_type = meta_cached.get("contract_type", {}).get("value", "") if isinstance(meta_cached.get("contract_type"), dict) else ""
+    effective_date = meta_cached.get("effective_date", {}).get("value", "") if isinstance(meta_cached.get("effective_date"), dict) else ""
+    governing_law = meta_cached.get("governing_law", {}).get("value", "") if isinstance(meta_cached.get("governing_law"), dict) else ""
+
+    # 4. Run verification
+    result = await run_in_threadpool(
+        verify_vendor,
+        vendor_name=vendor_name,
+        customer_name=customer_name,
+        contract_type=contract_type,
+        effective_date=effective_date,
+        governing_law=governing_law,
+    )
+
+    # Cache result
+    _cache_set(payload.contract_id, "vendor_verification", result)
+    try:
+        await store.set_vendor_verification(payload.contract_id, result)
+    except Exception:
+        pass
+
+    return VendorVerifyResponse(contract_id=payload.contract_id, **result)
+
+
+@app.delete("/contracts/{contract_id}")
+async def delete_contract(contract_id: str):
+    """Delete a single contract and all its associated data."""
+    _mem_cache.pop(contract_id, None)
+    try:
+        await store.delete_contract(contract_id)
+    except Exception:
+        pass
+    return {"status": "deleted", "contract_id": contract_id}
+
+
 @app.post("/clear")
 async def clear_session():
-    """Wipes the database collections to start a new session."""
-    await store.clear_all()
-    # If the queue has memory states we could reset them here too, but MongoDB is the primary source of truth.
+    """Wipes the database collections and in-memory cache to start a new session."""
+    _mem_cache.clear()
+    try:
+        await store.clear_all()
+    except Exception:
+        pass  # MongoDB best-effort
     return {"status": "cleared", "message": "New session created successfully."}
+
+
+# ── Zoho Sign Endpoints ────────────────────────────────────────────
+
+@app.post("/verify-signature")
+async def verify_signature_endpoint(payload: ZohoSignatureRequest) -> ZohoSignatureResponse:
+    """Verify the digital signature status of a Zoho Sign document."""
+    if not zoho_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Zoho Sign is not configured. Set ZOHO_CLIENT_ID, ZOHO_CLIENT_SECRET, and ZOHO_REFRESH_TOKEN.",
+        )
+    try:
+        result = await zoho_verify_signature(payload.request_id)
+    except RuntimeError as exc:
+        detail = str(exc)
+        if "auth failed" in detail.lower():
+            raise HTTPException(status_code=401, detail=detail)
+        raise HTTPException(status_code=500, detail=detail)
+
+    if result is None:
+        raise HTTPException(status_code=404, detail=f"Zoho Sign request {payload.request_id} not found.")
+
+    return ZohoSignatureResponse(**result)
+
+
+@app.post("/audit-trail")
+async def audit_trail_endpoint(payload: ZohoSignatureRequest) -> ZohoAuditTrailResponse:
+    """Get the signing audit trail for a Zoho Sign document."""
+    if not zoho_configured():
+        raise HTTPException(
+            status_code=503,
+            detail="Zoho Sign is not configured.",
+        )
+    try:
+        events = await zoho_get_audit_trail(payload.request_id)
+    except RuntimeError as exc:
+        detail = str(exc)
+        if "auth failed" in detail.lower():
+            raise HTTPException(status_code=401, detail=detail)
+        raise HTTPException(status_code=500, detail=detail)
+
+    return ZohoAuditTrailResponse(request_id=payload.request_id, events=events)
+
+
+@app.get("/zoho-status")
+async def zoho_status():
+    """Check if Zoho Sign integration is configured."""
+    return {"configured": zoho_configured()}

@@ -1,15 +1,28 @@
-import React, { useState, useRef } from 'react';
+import { useState, useRef } from 'react';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
-import { fetchContracts, uploadContract, fetchContractStatus, clearSession, type Contract } from './api';
+import {
+  fetchContracts,
+  uploadContract,
+  fetchContractStatus,
+  clearSession,
+  type Contract,
+  type UploadResponse,
+} from './api';
+import { AnalyzeView } from './components/AnalyzeView';
 import { ContractsView } from './components/ContractsView';
 import { CompareView } from './components/CompareView';
 
-// Individual Polling Component for the table rows
-const ProcessingTableRow = ({ contract, isNewUpload }: { contract: Contract, isNewUpload?: boolean }) => {
-  
-  // Conditionally poll if status is parsing/indexing/queued
+/* ── Processing Row (polls /status) ─────────────────────────── */
+
+const ProcessingTableRow = ({
+  contract,
+  isNewUpload,
+}: {
+  contract: Contract;
+  isNewUpload?: boolean;
+}) => {
   const isProcessing = ['queued', 'parsing', 'indexing', 'processing'].includes(contract.status);
-  
+
   const { data: liveStatus } = useQuery({
     queryKey: ['contractStatus', contract.id],
     queryFn: () => fetchContractStatus(contract.id),
@@ -18,71 +31,58 @@ const ProcessingTableRow = ({ contract, isNewUpload }: { contract: Contract, isN
   });
 
   const currentStatus = liveStatus?.status || contract.status;
-  const isNowProcessing = ['queued', 'parsing', 'indexing', 'processing'].includes(currentStatus);
   const isDone = currentStatus === 'ready';
+  const isFailed = currentStatus === 'failed';
 
-  let progress = 0;
-  if (currentStatus === 'queued') progress = 10;
-  else if (currentStatus === 'parsing') progress = 40;
-  else if (currentStatus === 'indexing') progress = 80;
-  else if (currentStatus === 'ready') progress = 100;
-  
-  // Progress bar rendering
   return (
-    <tr className="hover:bg-surface-container-low/30 transition-all group">
-      <td className="px-8 py-6">
+    <tr className="table-row">
+      <td className="px-5 py-4">
         <div className="flex items-center gap-3">
-          <span className={`material-symbols-outlined ${contract.filename.endsWith('pdf') ? 'text-red-500' : 'text-blue-500'}`}>
-            {contract.filename.endsWith('pdf') ? 'picture_as_pdf' : 'description'}
-          </span>
-          <span className="font-medium text-on-surface">{contract.filename}</span>
-          {isNewUpload && <span className="ml-2 px-2 py-0.5 bg-tertiary-fixed text-on-tertiary-fixed rounded text-[10px] font-bold">NEW</span>}
+          <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${contract.filename.endsWith('.pdf') ? 'bg-red-500/10' : 'bg-blue-500/10'}`}>
+            <span className={`material-symbols-outlined text-sm ${contract.filename.endsWith('.pdf') ? 'text-red-400' : 'text-blue-400'}`}>
+              {contract.filename.endsWith('.pdf') ? 'picture_as_pdf' : 'description'}
+            </span>
+          </div>
+          <div>
+            <span className="font-semibold text-[var(--text-primary)] text-sm">{contract.filename}</span>
+            {isNewUpload && (
+              <span className="ml-2 px-1.5 py-0.5 text-[9px] font-bold rounded bg-emerald-500/15 text-emerald-400">NEW</span>
+            )}
+            <p className="text-[11px] text-[var(--text-muted)] mt-0.5 font-mono">{contract.id.slice(0, 12)}…</p>
+          </div>
         </div>
       </td>
-      <td className="px-8 py-6">
-        {isNowProcessing && (
-          <span className="px-3 py-1 bg-blue-50 text-blue-600 rounded-full text-xs font-bold capitalize">
-            {currentStatus}...
-          </span>
-        )}
-        {isDone && (
-          <span className="px-3 py-1 bg-emerald-50 text-emerald-600 rounded-full text-xs font-bold">
-            Completed
-          </span>
-        )}
-        {!isNowProcessing && !isDone && (
-          <span className="px-3 py-1 bg-slate-100 text-slate-500 rounded-full text-xs font-bold capitalize">
-            {currentStatus}
-          </span>
-        )}
+      <td className="px-5 py-4">
+        {isDone && <span className="badge badge-ready">READY</span>}
+        {isFailed && <span className="badge badge-failed">FAILED</span>}
+        {!isDone && !isFailed && <span className="badge badge-processing">{currentStatus.toUpperCase()}</span>}
       </td>
-      <td className="px-8 py-6">
-        <div className="w-32 bg-slate-100 h-1.5 rounded-full overflow-hidden">
-          <div 
-            className={`h-full transition-all duration-1000 ${isDone ? 'bg-emerald-500' : 'bg-primary'}`} 
-            style={{ width: `${progress}%` }}
-          ></div>
-        </div>
-      </td>
-      <td className="px-8 py-6 text-right">
-        {isDone && (
-          <button className="p-2 text-slate-400 hover:text-primary transition-all">
-            <span className="material-symbols-outlined">visibility</span>
-          </button>
-        )}
+      <td className="px-5 py-4">
+        {contract.uploadedAt
+          ? (
+            <div>
+              <span className="text-xs text-[var(--text-primary)] font-medium">
+                {new Date(contract.uploadedAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}
+              </span>
+              <span className="text-[10px] text-[var(--text-muted)] ml-1.5">
+                {new Date(contract.uploadedAt).toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
+              </span>
+            </div>
+          )
+          : <span className="text-xs text-[var(--text-muted)]">—</span>}
       </td>
     </tr>
   );
 };
 
+/* ── Main App ───────────────────────────────────────────────── */
 
 function App() {
-  const [activeView, setActiveView] = useState<'dashboard' | 'vault' | 'compare'>('dashboard');
+  const [activeView, setActiveView] = useState<'dashboard' | 'analyze' | 'vault' | 'compare'>('dashboard');
   const [newUploadIds, setNewUploadIds] = useState<string[]>([]);
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Fetch all contracts globally
   const { data: contracts = [], isLoading: isContractsLoading } = useQuery({
     queryKey: ['contracts'],
     queryFn: fetchContracts,
@@ -90,24 +90,12 @@ function App() {
 
   const uploadMutation = useMutation({
     mutationFn: uploadContract,
-    onSuccess: (data) => {
+    onSuccess: (data: UploadResponse) => {
       setNewUploadIds((prev) => [data.contract_id, ...prev]);
       queryClient.invalidateQueries({ queryKey: ['contracts'] });
+      setActiveView('vault');
     },
   });
-
-  const handleFileDrop = (e: React.DragEvent) => {
-    e.preventDefault();
-    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
-      uploadMutation.mutate(e.dataTransfer.files[0]);
-    }
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files && e.target.files[0]) {
-      uploadMutation.mutate(e.target.files[0]);
-    }
-  };
 
   const clearMutation = useMutation({
     mutationFn: clearSession,
@@ -115,267 +103,232 @@ function App() {
       setNewUploadIds([]);
       setActiveView('dashboard');
       queryClient.invalidateQueries({ queryKey: ['contracts'] });
-    }
+    },
   });
 
-  const activeProcessing = contracts.filter(c => ['queued', 'parsing', 'indexing'].includes(c.status)).length;
-  const verifiedCompleted = contracts.filter(c => c.status === 'ready').length;
-  const anomalies = contracts.filter(c => c.status === 'error').length;
+  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
+    if (e.target.files?.[0]) uploadMutation.mutate(e.target.files[0]);
+  };
 
-  // Render recent queue (prioritize new uploads, then processing, then recently completed)
-  const queueToDisplay = [...contracts]
+  const activeProcessing = contracts.filter((c) =>
+    ['queued', 'parsing', 'indexing', 'processing'].includes(c.status)
+  ).length;
+  const completed = contracts.filter((c) => c.status === 'ready').length;
+  const failed = contracts.filter((c) => c.status === 'failed' || c.status === 'error').length;
+
+  const recentContracts = [...contracts]
     .sort((a, b) => {
       if (newUploadIds.includes(a.id) && !newUploadIds.includes(b.id)) return -1;
       if (!newUploadIds.includes(a.id) && newUploadIds.includes(b.id)) return 1;
-      return 0; // maintain original list order otherwise
+      return 0;
     })
     .slice(0, 5);
 
+  const navItems = [
+    { key: 'dashboard' as const, icon: 'home', label: 'Overview' },
+    { key: 'analyze' as const, icon: 'bolt', label: 'New Scan' },
+    { key: 'vault' as const, icon: 'folder_open', label: 'History' },
+    { key: 'compare' as const, icon: 'compare_arrows', label: 'Compare' },
+  ];
+
   return (
-    <div className="bg-background text-on-background font-body antialiased min-h-screen">
-      {/* SideNavBar */}
-      <aside className="fixed left-0 top-0 h-screen w-64 bg-slate-50 dark:bg-slate-900 border-r border-slate-200 dark:border-slate-800 flex flex-col py-8 px-4 z-[60]">
-        <div className="mb-10 px-2">
-          <div className="text-xl font-black text-teal-700 dark:text-teal-300 tracking-tighter">ContractGuard AI</div>
-          <p className="text-[10px] font-label uppercase tracking-[0.2em] text-slate-500 mt-1">Clinical Architect v1.0</p>
+    <div className="min-h-screen flex" style={{ background: 'var(--bg-root)' }}>
+      {/* ── Sidebar ──────────────────────────────────────────── */}
+      <aside className="sidebar fixed top-0 left-0 bottom-0 w-[250px] flex flex-col z-50">
+        {/* Logo */}
+        <div className="px-5 py-6 flex items-center gap-3">
+          <div className="w-8 h-8 rounded-lg bg-emerald-500/15 flex items-center justify-center animate-glow">
+            <span className="material-symbols-outlined text-emerald-400 text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>shield</span>
+          </div>
+          <span className="text-emerald-400 font-bold text-base tracking-tight">CONTRACTGUARD</span>
         </div>
-        
-        <nav className="flex-1 space-y-1">
-          <button 
-            onClick={() => setActiveView('dashboard')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 transition-all text-left font-bold ${activeView === 'dashboard' ? 'text-teal-700 dark:text-teal-400 border-r-4 border-teal-600 bg-teal-50/50' : 'text-slate-500 dark:text-slate-400 hover:text-teal-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-          >
-            <span className="material-symbols-outlined" style={{fontVariationSettings: "'FILL' 1"}}>dashboard</span>
-            <span className="text-body-lg tracking-tight">Dashboard</span>
-          </button>
-          <button 
-            onClick={() => setActiveView('vault')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 transition-all text-left font-bold ${activeView === 'vault' ? 'text-teal-700 dark:text-teal-400 border-r-4 border-teal-600 bg-teal-50/50' : 'text-slate-500 dark:text-slate-400 hover:text-teal-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-          >
-            <span className="material-symbols-outlined">folder_open</span>
-            <span className="text-body-lg tracking-tight">Vault</span>
-          </button>
-          <button 
-            onClick={() => setActiveView('compare')}
-            className={`w-full flex items-center gap-3 px-3 py-2.5 transition-all text-left font-bold ${activeView === 'compare' ? 'text-teal-700 dark:text-teal-400 border-r-4 border-teal-600 bg-teal-50/50' : 'text-slate-500 dark:text-slate-400 hover:text-teal-600 hover:bg-slate-100 dark:hover:bg-slate-800'}`}
-          >
-            <span className="material-symbols-outlined">compare_arrows</span>
-            <span className="text-body-lg tracking-tight">Compare</span>
-          </button>
+
+        {/* Nav Items */}
+        <nav className="px-3 mt-2 space-y-1 flex-1">
+          {navItems.map((item) => (
+            <button
+              key={item.key}
+              onClick={() => setActiveView(item.key)}
+              className={`sidebar-item w-full text-left ${activeView === item.key ? 'active' : ''}`}
+            >
+              <span className="material-symbols-outlined text-lg" style={{ fontVariationSettings: activeView === item.key ? "'FILL' 1" : "'FILL' 0" }}>
+                {item.icon}
+              </span>
+              {item.label}
+              {item.key === 'vault' && contracts.length > 0 && (
+                <span className="ml-auto text-[10px] font-bold bg-emerald-500/15 text-emerald-400 px-2 py-0.5 rounded-full">
+                  {contracts.length}
+                </span>
+              )}
+            </button>
+          ))}
         </nav>
-        
-        <div className="mt-auto px-2 space-y-2">
-          <button 
+
+        {/* Bottom Actions */}
+        <div className="px-3 pb-4 space-y-2">
+          <button
             onClick={() => clearMutation.mutate()}
-            disabled={clearMutation.isPending || contracts.length === 0}
-            className="w-full py-3 bg-red-50 text-red-600 rounded-full font-bold shadow-sm hover:bg-red-100 disabled:opacity-50 transition-all flex items-center justify-center gap-2"
+            className="sidebar-item w-full text-left text-red-400/60 hover:text-red-400 hover:bg-red-500/10"
           >
-            {clearMutation.isPending ? <span className="material-symbols-outlined animate-spin">refresh</span> : <><span className="material-symbols-outlined">delete</span> Clear Vault</>}
+            <span className="material-symbols-outlined text-lg">delete_sweep</span>
+            Clear Vault
           </button>
-          <button 
-            onClick={() => fileInputRef.current?.click()}
-            className="w-full py-3 bg-gradient-to-br from-primary to-primary-container text-on-primary rounded-full font-semibold shadow-lg shadow-primary/20 hover:scale-[1.02] active:scale-95 transition-all flex items-center justify-center gap-2"
+          <button
+            onClick={() => setActiveView('analyze')}
+            className="btn-primary w-full flex items-center justify-center gap-2 text-sm"
           >
-            {uploadMutation.isPending ? <span className="material-symbols-outlined animate-spin">refresh</span> : 'New Upload'}
+            <span className="material-symbols-outlined text-base">add</span> New Upload
           </button>
-          <input 
-            type="file" 
-            ref={fileInputRef} 
-            className="hidden" 
+          <input
+            type="file"
+            ref={fileInputRef}
+            className="hidden"
             accept=".pdf,.docx,.txt"
-            onChange={handleFileSelect} 
+            onChange={handleFileSelect}
           />
+        </div>
+
+        {/* User Profile */}
+        <div className="px-4 py-4 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
+          <div className="flex items-center gap-3">
+            <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-bold text-emerald-400">A</div>
+            <div>
+              <p className="text-xs font-semibold text-[var(--text-primary)]">Admin</p>
+              <p className="text-[10px] text-[var(--text-muted)]">ContractGuard AI</p>
+            </div>
+          </div>
         </div>
       </aside>
 
-      {/* TopNavBar */}
-      <header className="fixed top-0 right-0 w-[calc(100%-16rem)] h-16 bg-white/70 dark:bg-slate-900/70 backdrop-blur-xl z-50 flex justify-between items-center px-8 shadow-2xl shadow-slate-900/5 transition-opacity duration-300">
-        <div className="flex items-center bg-surface-container-low rounded-full px-4 py-1.5 w-96">
-          <span className="material-symbols-outlined text-slate-400 text-xl">search</span>
-          <input className="bg-transparent border-none outline-none focus:ring-0 text-sm w-full placeholder:text-slate-400 ml-2" placeholder="Search contracts, risks, or entities..." type="text" />
-        </div>
-        <div className="flex items-center gap-6">
-          <div className="flex items-center gap-3 pl-6 border-l border-slate-200 dark:border-slate-800">
-            <div className="text-right">
-              <p className="text-xs font-bold text-slate-900 dark:text-white">Admin</p>
-              <p className="text-[10px] text-slate-500 uppercase tracking-widest font-label">Lead Architect</p>
+      {/* ── Main Content ─────────────────────────────────────── */}
+      <main className="ml-[250px] flex-1 min-h-screen">
+        {/* Top Bar */}
+        <header className="sticky top-0 z-40 px-8 h-14 flex items-center justify-between" style={{ background: 'var(--bg-root)', borderBottom: '1px solid var(--border-subtle)' }}>
+          <div className="flex items-center gap-3">
+            <div className="input-dark flex items-center gap-2 w-72">
+              <span className="material-symbols-outlined text-[var(--text-muted)] text-sm">search</span>
+              <input className="bg-transparent border-none outline-none text-sm w-full text-[var(--text-primary)] placeholder:text-[var(--text-muted)]" placeholder="Search contracts…" type="text" />
             </div>
-            <div className="w-10 h-10 rounded-full bg-primary/20 flex items-center justify-center text-primary font-bold">A</div>
           </div>
-        </div>
-      </header>
+          <div className="flex items-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${isContractsLoading ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'}`} />
+            <span className="text-xs text-[var(--text-muted)] font-medium">
+              {isContractsLoading ? 'Syncing…' : 'Connected'}
+            </span>
+          </div>
+        </header>
 
-      {/* Main Content Canvas */}
-      <main className="ml-64 pt-16 min-h-screen">
-        <div className="max-w-7xl mx-auto px-8 py-12">
-          
-          {/* Hero Section */}
-          <section className="relative mb-16">
-            <div className="flex flex-col lg:flex-row lg:items-end justify-between gap-8">
-              <div className="max-w-2xl">
-                <span className="text-xs font-label uppercase tracking-[0.3em] text-primary font-semibold mb-4 block">System Overview</span>
-                <h1 className="text-4xl md:text-5xl font-extrabold text-on-background tracking-tight mb-4 leading-tight">Contract Intelligence Dashboard</h1>
-                <p className="text-body-lg text-secondary leading-relaxed max-w-lg">
-                  Leverage clinical-grade AI to parse, validate, and compare legal frameworks with 99.8% precision.
-                </p>
-              </div>
-            </div>
-            {/* AI Insight Widget */}
-            <div className="mt-12 p-6 glass-effect bg-surface-container-low/70 rounded-lg border-l-4 border-primary shadow-2xl shadow-primary/5 flex items-center justify-between">
-              <div className="flex items-center gap-4">
-                <div className="w-12 h-12 bg-primary/10 rounded-full flex items-center justify-center">
-                  <span className="material-symbols-outlined text-primary" style={{fontVariationSettings: "'FILL' 1"}}>psychology</span>
-                </div>
-                <div>
-                  <h4 className="font-bold text-on-surface">API Status</h4>
-                  <p className="text-secondary text-sm">
-                    {isContractsLoading ? 'Syncing to Backend...' : 'Global systems synchronized with FastAPI node.'}
-                  </p>
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Stats Grid */}
-          <section className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-16">
-            <div className="bg-surface-container-lowest p-6 rounded-lg shadow-sm border border-transparent hover:border-outline-variant/30 transition-all group">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-2 bg-slate-100 rounded-lg text-slate-600">
-                  <span className="material-symbols-outlined">folder_zip</span>
-                </div>
-              </div>
-              <p className="text-xs font-label uppercase tracking-widest text-secondary font-bold mb-1">Total Vault</p>
-              <h3 className="text-3xl font-black text-on-surface">{contracts.length}</h3>
-            </div>
-            
-            <div className="bg-surface-container-lowest p-6 rounded-lg shadow-sm border border-transparent hover:border-outline-variant/30 transition-all">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-2 bg-blue-50 rounded-lg text-blue-600">
-                  <span className="material-symbols-outlined">sync</span>
-                </div>
-              </div>
-              <p className="text-xs font-label uppercase tracking-widest text-secondary font-bold mb-1">Processing</p>
-              <h3 className="text-3xl font-black text-on-surface">{activeProcessing}</h3>
-            </div>
-            
-            <div className="bg-surface-container-lowest p-6 rounded-lg shadow-sm border border-transparent hover:border-outline-variant/30 transition-all">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-2 bg-emerald-50 rounded-lg text-emerald-600">
-                  <span className="material-symbols-outlined">verified</span>
-                </div>
-              </div>
-              <p className="text-xs font-label uppercase tracking-widest text-secondary font-bold mb-1">Completed</p>
-              <h3 className="text-3xl font-black text-on-surface">{verifiedCompleted}</h3>
-            </div>
-
-            <div className="bg-surface-container-lowest p-6 rounded-lg shadow-sm border border-transparent hover:border-outline-variant/30 transition-all">
-              <div className="flex justify-between items-start mb-4">
-                <div className="p-2 bg-error-container/30 rounded-lg text-error">
-                  <span className="material-symbols-outlined">report</span>
-                </div>
-              </div>
-              <p className="text-xs font-label uppercase tracking-widest text-secondary font-bold mb-1">Anomalies</p>
-              <h3 className="text-3xl font-black text-on-surface">{anomalies}</h3>
-            </div>
-          </section>
-
-          {/* Conditional Rendering of Views */}
+        <div className="max-w-6xl mx-auto px-8 py-8">
+          {/* ── Dashboard Overview ─────────────────────────── */}
           {activeView === 'dashboard' && (
-            <section className="mb-16">
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-12 animate-in fade-in slide-in-from-bottom-4">
-                {/* Left Column (Upload & Queue) */}
-                <div className="lg:col-span-2 space-y-12">
-                  {/* Drag and Drop */}
-                  <div 
-                    className="relative group"
-                    onDragOver={(e) => e.preventDefault()}
-                    onDrop={handleFileDrop}
-                    onClick={() => fileInputRef.current?.click()}
-                  >
-                    <div className="absolute -inset-1 bg-gradient-to-r from-primary/20 to-primary-container/20 rounded-lg blur opacity-25 group-hover:opacity-100 transition duration-1000 group-hover:duration-200"></div>
-                    <div className="relative bg-surface-container-lowest p-16 rounded-lg border-2 border-dashed border-outline-variant hover:border-primary transition-colors flex flex-col items-center justify-center text-center cursor-pointer">
-                      <div className="w-20 h-20 bg-primary/5 rounded-full flex items-center justify-center mb-6">
-                        <span className="material-symbols-outlined text-4xl text-primary">
-                          {uploadMutation.isPending ? 'refresh' : 'upload_file'}
-                        </span>
-                      </div>
-                      <h3 className="text-2xl font-bold mb-2">
-                         {uploadMutation.isPending ? 'Uploading to API...' : 'Drop contracts here or browse'}
-                      </h3>
-                      <p className="text-secondary mb-8">Support for PDF, DOCX, and TXT files</p>
-                      <button className="px-6 py-2.5 border-2 border-primary text-primary font-bold rounded-full hover:bg-primary hover:text-on-primary transition-all">
-                        Select Files
-                      </button>
-                    </div>
-                  </div>
+            <div className="animate-fade-in-up">
+              {/* Welcome Header */}
+              <div className="mb-8">
+                <h1 className="text-3xl font-bold text-[var(--text-primary)]">Welcome back</h1>
+                <p className="text-[var(--text-secondary)] mt-1">Here is an overview of your contract analysis usage and recent activity.</p>
+              </div>
 
-                  {/* Queue Table */}
-                  <div className="bg-surface-container-lowest rounded-lg shadow-2xl shadow-slate-900/5 overflow-hidden">
-                    <div className="px-8 py-6 border-b border-surface-container-low flex justify-between items-center">
-                      <h3 className="font-bold text-xl">Upload Queue & History</h3>
-                      <div className="flex items-center gap-2">
-                        {activeProcessing > 0 && <span className="w-2 h-2 bg-blue-500 rounded-full animate-pulse"></span>}
-                        <span className="text-xs font-bold uppercase tracking-widest text-secondary">{activeProcessing} Files Processing</span>
-                      </div>
-                    </div>
-                    
-                    <table className="w-full text-left">
-                      <thead className="bg-surface-container-low text-[10px] font-label uppercase tracking-widest text-secondary">
-                        <tr>
-                          <th className="px-8 py-4">File Name</th>
-                          <th className="px-8 py-4">Status</th>
-                          <th className="px-8 py-4">Progress</th>
-                          <th className="px-8 py-4 text-right">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-surface-container-low">
-                        {queueToDisplay.length === 0 ? (
-                          <tr>
-                            <td colSpan={4} className="px-8 py-12 text-center text-secondary">No contracts in vault. Please upload above.</td>
-                          </tr>
-                        ) : (
-                          queueToDisplay.map((contract) => (
-                            <ProcessingTableRow 
-                              key={contract.id} 
-                              contract={contract} 
-                              isNewUpload={newUploadIds.includes(contract.id)} 
-                            />
-                          ))
-                        )}
-                      </tbody>
-                    </table>
+              {/* Stats Row */}
+              <div className="grid grid-cols-3 gap-5 mb-8 animate-fade-in-up-delay-1">
+                {/* Scans Used */}
+                <div className="card-accent p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Contracts Analyzed</span>
+                    <span className="material-symbols-outlined text-emerald-400 text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>query_stats</span>
+                  </div>
+                  <div className="flex items-end gap-1">
+                    <span className="text-4xl font-black text-[var(--text-primary)]">{completed}</span>
+                    <span className="text-lg text-[var(--text-muted)] mb-1">/ ∞</span>
+                  </div>
+                  <div className="mt-3 h-1.5 rounded-full overflow-hidden" style={{ background: 'var(--border-subtle)' }}>
+                    <div className="h-full rounded-full bg-emerald-500 transition-all duration-1000" style={{ width: `${Math.min(completed * 5, 100)}%` }} />
                   </div>
                 </div>
 
-                {/* Right Column (Insights) */}
-                <div className="lg:col-span-1 space-y-8">
-                  <div className="bg-surface-container-lowest p-8 rounded-lg shadow-sm border border-outline-variant/20">
-                    <h4 className="text-[10px] uppercase tracking-[0.2em] font-bold text-secondary mb-6">Backend Capabilities</h4>
-                    <div className="space-y-6">
-                      <div className="flex gap-4">
-                        <div className="flex-shrink-0 w-1 h-12 bg-primary rounded-full"></div>
-                        <div>
-                          <p className="text-sm font-bold text-on-surface">Vectorization Enabled</p>
-                          <p className="text-xs text-secondary mt-1">Files uploaded are instantly pushed to the `/upload` API endpoint.</p>
-                        </div>
-                      </div>
-                      <div className="flex gap-4">
-                        <div className="flex-shrink-0 w-1 h-12 bg-tertiary rounded-full"></div>
-                        <div>
-                          <p className="text-sm font-bold text-on-surface">Data Polling Live</p>
-                          <p className="text-xs text-secondary mt-1">Tanstack Query gracefully queries `/contracts/:id/status` mapping logic to visual progress bars.</p>
-                        </div>
-                      </div>
-                    </div>
+                {/* Current Plan */}
+                <div className="card p-6">
+                  <div className="flex items-center justify-between mb-4">
+                    <span className="text-[11px] font-bold uppercase tracking-widest text-[var(--text-muted)]">Current Plan</span>
+                    <span className="material-symbols-outlined text-emerald-400 text-lg" style={{ fontVariationSettings: "'FILL' 1" }}>diamond</span>
                   </div>
+                  <p className="text-2xl font-black text-emerald-400 mb-1">Pro Tier</p>
+                  <p className="text-xs text-[var(--text-muted)]">Unlimited AI analysis with Gemini 2.5 Pro & Indian Law citations</p>
+                </div>
+
+                {/* CTA */}
+                <div className="card-cta p-6 flex flex-col justify-between">
+                  <div>
+                    <h3 className="text-lg font-bold mb-1">Initiate Analysis</h3>
+                    <p className="text-sm text-white/70">Upload a contract or paste text for AI-powered risk analysis</p>
+                  </div>
+                  <button onClick={() => setActiveView('analyze')} className="mt-4 w-full py-2.5 bg-white/20 hover:bg-white/30 rounded-lg font-bold text-sm transition-all backdrop-blur-sm">
+                    Launch Scanner
+                  </button>
                 </div>
               </div>
-            </section>
+
+              {/* Stats Grid */}
+              <div className="grid grid-cols-4 gap-4 mb-8 animate-fade-in-up-delay-2">
+                {[
+                  { label: 'Total Contracts', value: contracts.length, icon: 'folder_zip', color: 'text-slate-400' },
+                  { label: 'Processing', value: activeProcessing, icon: 'sync', color: 'text-blue-400' },
+                  { label: 'Completed', value: completed, icon: 'verified', color: 'text-emerald-400' },
+                  { label: 'Failed', value: failed, icon: 'report', color: 'text-red-400' },
+                ].map((stat) => (
+                  <div key={stat.label} className="card p-4">
+                    <div className="flex items-center gap-3">
+                      <span className={`material-symbols-outlined text-lg ${stat.color}`} style={{ fontVariationSettings: "'FILL' 1" }}>{stat.icon}</span>
+                      <div>
+                        <p className="text-[10px] font-bold uppercase tracking-widest text-[var(--text-muted)]">{stat.label}</p>
+                        <p className="text-xl font-black text-[var(--text-primary)]">{stat.value}</p>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+
+              {/* Recent Scans */}
+              <div className="card overflow-hidden animate-fade-in-up-delay-2">
+                <div className="px-5 py-4 flex justify-between items-center" style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                  <h3 className="font-bold text-base text-[var(--text-primary)]">Recent Scans</h3>
+                  <button onClick={() => setActiveView('vault')} className="text-xs font-bold text-emerald-400 hover:text-emerald-300 transition-colors flex items-center gap-1">
+                    View All History <span className="material-symbols-outlined text-sm">arrow_forward</span>
+                  </button>
+                </div>
+                <table className="w-full text-left">
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--border-subtle)' }}>
+                      <th className="px-5 py-3 table-header">Source / File</th>
+                      <th className="px-5 py-3 table-header">Status</th>
+                      <th className="px-5 py-3 table-header">Scanned At</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {recentContracts.length === 0 ? (
+                      <tr>
+                        <td colSpan={3} className="px-5 py-12 text-center text-[var(--text-muted)] text-sm">
+                          No contracts uploaded yet. Go to <button onClick={() => setActiveView('analyze')} className="text-emerald-400 font-bold hover:underline">New Scan</button> to get started.
+                        </td>
+                      </tr>
+                    ) : (
+                      recentContracts.map((contract) => (
+                        <ProcessingTableRow
+                          key={contract.id}
+                          contract={contract}
+                          isNewUpload={newUploadIds.includes(contract.id)}
+                        />
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
           )}
 
+          {/* ── Dedicated Views ────────────────────────────── */}
+          {activeView === 'analyze' && <AnalyzeView />}
           {activeView === 'vault' && <ContractsView contracts={contracts} />}
           {activeView === 'compare' && <CompareView contracts={contracts} />}
-
         </div>
       </main>
     </div>

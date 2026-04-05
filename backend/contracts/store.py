@@ -44,6 +44,8 @@ class MongoContractStore:
     def chat_history(self): return self.db.chat_history
     @property
     def metadata(self): return self.db.metadata
+    @property
+    def vendor_verifications(self): return self.db.vendor_verifications
 
     async def clear_all(self) -> None:
         """Clear the entire database for a new session."""
@@ -52,6 +54,16 @@ class MongoContractStore:
         await self.risks.drop()
         await self.chat_history.drop()
         await self.metadata.drop()
+        await self.vendor_verifications.drop()
+
+    async def delete_contract(self, contract_id: str) -> None:
+        """Delete a single contract and all associated data."""
+        await self.contracts.delete_one({"_id": contract_id})
+        await self.summaries.delete_one({"_id": contract_id})
+        await self.risks.delete_one({"_id": contract_id})
+        await self.chat_history.delete_many({"contract_id": contract_id})
+        await self.metadata.delete_one({"_id": contract_id})
+        await self.vendor_verifications.delete_one({"_id": contract_id})
 
     async def save_contract(self, contract_id: str, title: str, text: str) -> None:
         """Save basic contract text info without vector data."""
@@ -176,6 +188,21 @@ class MongoContractStore:
     async def get_metadata(self, contract_id: str) -> dict | None:
         """Retrieve cached metadata for a contract."""
         doc = await self.metadata.find_one({"_id": contract_id})
+        return doc.get("data") if doc else None
+
+    # ── Vendor verification storage ──────────────────────────────────
+
+    async def set_vendor_verification(self, contract_id: str, data: dict) -> None:
+        """Cache vendor verification result."""
+        await self.vendor_verifications.update_one(
+            {"_id": contract_id},
+            {"$set": {"data": data}},
+            upsert=True,
+        )
+
+    async def get_vendor_verification(self, contract_id: str) -> dict | None:
+        """Retrieve cached vendor verification."""
+        doc = await self.vendor_verifications.find_one({"_id": contract_id})
         return doc.get("data") if doc else None
 
     async def list_all_contracts(self) -> List[Dict[str, Any]]:
