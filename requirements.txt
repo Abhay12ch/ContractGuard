@@ -1,7 +1,4 @@
 fastapi
-uvicorn
-faiss-cpu
-sentence-transformers
 pypdf
 python-docx
 python-multipart
@@ -9,4 +6,4 @@ google-genai
 python-dotenv
 motor
 httpx
-fpdf2
+numpy
