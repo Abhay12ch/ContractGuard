@@ -132,7 +132,26 @@ class ZohoAuditTrailResponse(BaseModel):
     events: List[Dict[str, Any]]
 
 
+class SignupRequest(BaseModel):
+    email: str
+    password: str
+    display_name: str = ""
+
+
+class SigninRequest(BaseModel):
+    email: str
+    password: str
+
+
+class AuthResponse(BaseModel):
+    user_id: str
+    email: str | None = None
+    display_name: str
+    is_guest: bool = False
+
+
 __all__ = [
+    "AuthResponse",
     "ContractStatusResponse",
     "ContractListItem",
     "ContractListResponse",
@@ -145,6 +164,8 @@ __all__ = [
     "QAResponse",
     "RisksRequest",
     "RisksResponse",
+    "SigninRequest",
+    "SignupRequest",
     "SummaryRequest",
     "SummaryResponse",
     "UploadResponse",

@@ -263,4 +263,39 @@ export const fetchZohoAuditTrail = async (requestId: string): Promise<{ request_
   return data;
 };
 
+// ── Authentication ─────────────────────────────────────────────────
+
+export interface AuthUser {
+  user_id: string;
+  email: string | null;
+  display_name: string;
+  is_guest: boolean;
+}
+
+export const signup = async (
+  email: string,
+  password: string,
+  displayName: string = ''
+): Promise<AuthUser> => {
+  const { data } = await api.post('/auth/signup', {
+    email,
+    password,
+    display_name: displayName,
+  });
+  return data;
+};
+
+export const signin = async (
+  email: string,
+  password: string
+): Promise<AuthUser> => {
+  const { data } = await api.post('/auth/signin', { email, password });
+  return data;
+};
+
+export const guestLogin = async (): Promise<AuthUser> => {
+  const { data } = await api.post('/auth/guest');
+  return data;
+};
+
 export default api;

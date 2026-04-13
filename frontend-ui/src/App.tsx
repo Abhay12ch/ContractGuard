@@ -7,10 +7,12 @@ import {
   clearSession,
   type Contract,
   type UploadResponse,
+  type AuthUser,
 } from './api';
 import { AnalyzeView } from './components/AnalyzeView';
 import { ContractsView } from './components/ContractsView';
 import { CompareView } from './components/CompareView';
+import { LandingPage } from './components/LandingPage';
 
 /* ── Processing Row (polls /status) ─────────────────────────── */
 
@@ -78,11 +80,51 @@ const ProcessingTableRow = ({
 /* ── Main App ───────────────────────────────────────────────── */
 
 function App() {
+  const [user, setUser] = useState<AuthUser | null>(null);
   const [activeView, setActiveView] = useState<'dashboard' | 'analyze' | 'vault' | 'compare'>('dashboard');
   const [newUploadIds, setNewUploadIds] = useState<string[]>([]);
   const queryClient = useQueryClient();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // ── Auth gate ────────────────────────────────────────────────
+  if (!user) {
+    return <LandingPage onAuth={(u) => setUser(u)} />;
+  }
+
+  // ── Authenticated app below ─────────────────────────────────
+
+  return <AuthenticatedApp
+    user={user}
+    onSignOut={() => setUser(null)}
+    activeView={activeView}
+    setActiveView={setActiveView}
+    newUploadIds={newUploadIds}
+    setNewUploadIds={setNewUploadIds}
+    queryClient={queryClient}
+    fileInputRef={fileInputRef}
+  />;
+}
+
+/* Extracted to a separate component so hooks are always called */
+function AuthenticatedApp({
+  user,
+  onSignOut,
+  activeView,
+  setActiveView,
+  newUploadIds,
+  setNewUploadIds,
+  queryClient,
+  fileInputRef,
+}: {
+  user: AuthUser;
+  onSignOut: () => void;
+  activeView: 'dashboard' | 'analyze' | 'vault' | 'compare';
+  setActiveView: (v: 'dashboard' | 'analyze' | 'vault' | 'compare') => void;
+  newUploadIds: string[];
+  setNewUploadIds: React.Dispatch<React.SetStateAction<string[]>>;
+  queryClient: ReturnType<typeof useQueryClient>;
+  fileInputRef: React.RefObject<HTMLInputElement | null>;
+}) {
   const { data: contracts = [], isLoading: isContractsLoading } = useQuery({
     queryKey: ['contracts'],
     queryFn: fetchContracts,
@@ -130,6 +172,8 @@ function App() {
     { key: 'vault' as const, icon: 'folder_open', label: 'History' },
     { key: 'compare' as const, icon: 'compare_arrows', label: 'Compare' },
   ];
+
+  const userInitial = user.display_name?.charAt(0)?.toUpperCase() || 'U';
 
   return (
     <div className="min-h-screen flex" style={{ background: 'var(--bg-root)' }}>
@@ -191,11 +235,22 @@ function App() {
         {/* User Profile */}
         <div className="px-4 py-4 border-t" style={{ borderColor: 'var(--border-subtle)' }}>
           <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-bold text-emerald-400">A</div>
-            <div>
-              <p className="text-xs font-semibold text-[var(--text-primary)]">Admin</p>
-              <p className="text-[10px] text-[var(--text-muted)]">ContractGuard AI</p>
+            <div className="w-8 h-8 rounded-full bg-emerald-500/20 flex items-center justify-center text-sm font-bold text-emerald-400">
+              {userInitial}
             </div>
+            <div className="flex-1 min-w-0">
+              <p className="text-xs font-semibold text-[var(--text-primary)] truncate">{user.display_name}</p>
+              <p className="text-[10px] text-[var(--text-muted)] truncate">
+                {user.is_guest ? 'Guest Session' : user.email}
+              </p>
+            </div>
+            <button
+              onClick={onSignOut}
+              className="text-[var(--text-muted)] hover:text-red-400 transition-colors"
+              title="Sign out"
+            >
+              <span className="material-symbols-outlined text-base">logout</span>
+            </button>
           </div>
         </div>
       </aside>
@@ -224,7 +279,7 @@ function App() {
             <div className="animate-fade-in-up">
               {/* Welcome Header */}
               <div className="mb-8">
-                <h1 className="text-3xl font-bold text-[var(--text-primary)]">Welcome back</h1>
+                <h1 className="text-3xl font-bold text-[var(--text-primary)]">Welcome back, {user.display_name}</h1>
                 <p className="text-[var(--text-secondary)] mt-1">Here is an overview of your contract analysis usage and recent activity.</p>
               </div>
 
@@ -336,3 +391,4 @@ function App() {
 }
 
 export default App;
+

@@ -57,6 +57,7 @@ from .contracts.summarizer import summarize_contract
 from .contracts.vendor_verifier import verify_vendor
 from .contracts.zoho_sign import zoho_configured, verify_signature as zoho_verify_signature, get_audit_trail as zoho_get_audit_trail
 
+from .auth import router as auth_router
 from .contracts.store import MongoContractStore
 from .core.config import settings
 from .core.exceptions import (
@@ -145,6 +146,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.include_router(auth_router)
 
 
 @app.get("/contracts", response_model=ContractListResponse)

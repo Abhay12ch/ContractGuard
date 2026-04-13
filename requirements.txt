@@ -7,3 +7,5 @@ python-dotenv
 motor
 httpx
 numpy
+passlib[bcrypt]
+bcrypt
