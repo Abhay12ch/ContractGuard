@@ -49,7 +49,7 @@ ContractGuard is a full-stack AI application that acts as your personal contract
 │  └─────────────┘  └────────────────────┘ │
 │                                          │
 │  ┌─────────────┐  ┌────────────────────┐ │
-│  │    FAISS    │  │   MongoDB Atlas    │ │
+│  │    NumPy    │  │   MongoDB Atlas    │ │
 │  │ Vector Store│  │ (persistent store) │ │
 │  └─────────────┘  └────────────────────┘ │
 │                                          │
@@ -70,9 +70,10 @@ ContractGuard is a full-stack AI application that acts as your personal contract
 | **Safety Scoring** | ISO 31000-compliant Risk Score & Safety Score (0-100) | Deterministic rules engine |
 | **Vendor Verification** | KYB trust assessment with 5 weighted checks | Gemini AI |
 | **Metadata Extraction** | Parties, dates, payment terms, governing law | Gemini AI |
-| **Interactive Q&A** | Ask natural-language questions about any contract | RAG + FAISS vector search |
+| **Interactive Q&A** | Ask natural-language questions about any contract | RAG + Vector search |
 | **Contract Comparison** | Side-by-side AI diff of two contracts | Gemini AI |
 | **Digital Signatures** | Verify signature status and audit trail | Zoho Sign API |
+| **User Authentication** | Secure user accounts, sign-up, sign-in, and guest sessions | passlib (bcrypt) |
 | **Dual Input Modes** | Upload PDF/DOCX files or paste raw contract text | FastAPI + PyPDF + python-docx |
 | **Persistent Storage** | All results cached in MongoDB for instant re-access | Motor (async) |
 
@@ -83,12 +84,13 @@ ContractGuard is a full-stack AI application that acts as your personal contract
 ### Backend
 | Layer | Technology |
 |-------|-----------|
-| Web Framework | FastAPI + Uvicorn |
+| Web Framework | FastAPI |
 | AI / LLM | Google Gemini 2.5 Pro (`google-genai`) |
-| Vector Search | FAISS + Sentence Transformers |
+| Vector Search | NumPy-based Vector Embeddings |
 | Database | MongoDB Atlas (async via Motor) |
 | Document Parsing | PyPDF, python-docx |
 | Signatures | Zoho Sign API (OAuth 2.0, httpx) |
+| Authentication | passlib (bcrypt) |
 
 ### Frontend
 | Layer | Technology |
@@ -284,6 +286,7 @@ ContractGuard/
 │   │   ├── gemini_client.py     # Gemini API client wrapper
 │   │   ├── session_manager.py   # Chat session ID management
 │   │   └── zoho_sign.py         # Zoho Sign API integration
+│   ├── auth.py                  # Authentication and user sessions
 │   ├── core/
 │   │   ├── config.py            # Centralized settings (env vars)
 │   │   ├── exceptions.py        # Custom exception hierarchy
@@ -292,6 +295,8 @@ ContractGuard/
 │       ├── queue.py             # Async background indexing queue
 │       └── upload_validation.py # File type + size validation
 │
+├── api/
+│   └── index.py                 # Vercel serverless entry point
 ├── frontend-ui/
 │   ├── src/
 │   │   ├── App.tsx              # App shell + routing + sidebar
@@ -307,6 +312,7 @@ ContractGuard/
 │   └── vite.config.ts
 │
 ├── requirements.txt             # Python dependencies
+├── vercel.json                  # Vercel deployment configuration
 └── .env                         # Local environment variables (not committed)
 ```
 
@@ -314,20 +320,17 @@ ContractGuard/
 
 ## 🚢 Deployment
 
-The backend can be deployed anywhere Python + uvicorn runs:
+The project is fully configured for a unified serverless deployment on **Vercel**.
 
 ```bash
-# Production start command
-uvicorn backend.main:app --host 0.0.0.0 --port $PORT
+# Install Vercel CLI
+npm i -g vercel
+
+# Deploy both frontend and backend automatically
+vercel --prod
 ```
 
-The frontend is a standard Vite SPA and can be deployed to Vercel, Netlify, or any static host:
-
-```bash
-cd frontend-ui
-npm run build
-# Output in dist/
-```
+The React/Vite frontend gets built statically using the `vercel-build` script, while the FastAPI backend runs natively as high-performance serverless Python functions mounted via the `api/index.py` entry point. All unified routing is automatically handled by the included `vercel.json`.
 
 ---
 
