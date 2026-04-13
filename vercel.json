@@ -10,7 +10,10 @@
     },
     {
       "src": "api/index.py",
-      "use": "@vercel/python"
+      "use": "@vercel/python",
+      "config": {
+        "includeFiles": "backend/**"
+      }
     }
   ],
   "routes": [
@@ -19,8 +22,16 @@
       "dest": "/api/index.py"
     },
     {
-      "src": "/(.*)",
+      "src": "/assets/(.*)",
+      "dest": "/frontend-ui/assets/$1"
+    },
+    {
+      "src": "/([^/]+\\.[^/]+)",
       "dest": "/frontend-ui/$1"
+    },
+    {
+      "src": "/(.*)",
+      "dest": "/frontend-ui/index.html"
     }
   ]
 }
