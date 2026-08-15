@@ -321,6 +321,29 @@ async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadRespo
     except ContractGuardError as exc:
         logger.warning("Upload indexing setup failed for %s: %s", file.filename, exc)
         raise to_http_exception(exc) from exc
+    except Exception as exc:
+        # MongoDB may be unreachable — fall back to in-memory-only storage
+        logger.warning(
+            "MongoDB unavailable during upload for %s, using in-memory fallback: %s",
+            file.filename, exc,
+        )
+        import uuid as _uuid
+        fallback_id = str(_uuid.uuid4())
+        _cache_set(fallback_id, "text", text)
+        _cache_set(fallback_id, "filename", file.filename)
+        _cache_set(fallback_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+
+        from .contracts.embedder import chunk_contract_text
+        chunks = chunk_contract_text(text)
+
+        return UploadResponse(
+            contract_id=fallback_id,
+            filename=file.filename,
+            text_preview=text[:300].replace("\n", " "),
+            chunk_count=len(chunks),
+            embedding_count=0,
+            status="ready",
+        )
 
 
 @app.post("/ingest-text", responses={400: {"description": "Invalid text ingest payload"}})
@@ -345,6 +368,29 @@ async def ingest_text(payload: IngestTextRequest) -> UploadResponse:
         return response
     except ContractGuardError as exc:
         raise to_http_exception(exc) from exc
+    except Exception as exc:
+        # MongoDB unreachable — fall back to in-memory-only
+        logger.warning(
+            "MongoDB unavailable during text ingest for %s, using in-memory fallback: %s",
+            filename, exc,
+        )
+        import uuid as _uuid
+        fallback_id = str(_uuid.uuid4())
+        _cache_set(fallback_id, "text", raw_text)
+        _cache_set(fallback_id, "filename", filename)
+        _cache_set(fallback_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+
+        from .contracts.embedder import chunk_contract_text
+        chunks = chunk_contract_text(raw_text)
+
+        return UploadResponse(
+            contract_id=fallback_id,
+            filename=filename,
+            text_preview=raw_text[:300].replace("\n", " "),
+            chunk_count=len(chunks),
+            embedding_count=0,
+            status="ready",
+        )
 
 
 @app.get("/contracts/{contract_id}/status")
