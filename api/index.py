@@ -17,9 +17,7 @@ if _project_root not in sys.path:
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from backend.main import app as _original_app
-
-# Create a wrapper app that mounts the original app under /api
+# Create a wrapper app that mounts the original app under /api and /
 app = FastAPI()
 
 app.add_middleware(
@@ -31,3 +29,4 @@ app.add_middleware(
 )
 
 app.mount("/api", _original_app)
+app.mount("/", _original_app)

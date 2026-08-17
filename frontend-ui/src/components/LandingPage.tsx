@@ -14,6 +14,17 @@ export const LandingPage = ({ onAuth }: LandingPageProps) => {
   const [loading, setLoading] = useState(false);
   const [guestLoading, setGuestLoading] = useState(false);
 
+  const getErrorMessage = (err: any, fallback: string) => {
+    if (err?.response?.data?.detail) {
+      const d = err.response.data.detail;
+      return typeof d === 'string' ? d : JSON.stringify(d);
+    }
+    if (err?.message === 'Network Error' || err?.code === 'ERR_NETWORK' || !err?.response) {
+      return 'Cannot connect to server. Ensure the backend is running (e.g. uvicorn backend.main:app --reload).';
+    }
+    return err?.message || fallback;
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
@@ -25,9 +36,7 @@ export const LandingPage = ({ onAuth }: LandingPageProps) => {
           : await signin(email, password);
       onAuth(user);
     } catch (err: any) {
-      const msg =
-        err?.response?.data?.detail || 'Something went wrong. Please try again.';
-      setError(msg);
+      setError(getErrorMessage(err, 'Something went wrong. Please try again.'));
     } finally {
       setLoading(false);
     }
@@ -39,8 +48,8 @@ export const LandingPage = ({ onAuth }: LandingPageProps) => {
     try {
       const user = await guestLogin();
       onAuth(user);
-    } catch {
-      setError('Failed to create guest session.');
+    } catch (err: any) {
+      setError(getErrorMessage(err, 'Failed to create guest session. Please try again.'));
     } finally {
       setGuestLoading(false);
     }

@@ -26,6 +26,10 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 _store: MongoContractStore | None = None
 
 
+# In-memory users cache (fallback when MongoDB is unreachable or for fast lookup)
+_mem_users: dict[str, dict] = {}
+
+
 def _get_store() -> MongoContractStore:
     global _store
     if _store is None:
@@ -42,7 +46,10 @@ def _hash_password(password: str) -> str:
 
 
 def _verify_password(password: str, hashed: str) -> bool:
-    return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    try:
+        return bcrypt.checkpw(password.encode("utf-8"), hashed.encode("utf-8"))
+    except Exception:
+        return False
 
 
 @router.post("/signup", response_model=AuthResponse)
@@ -54,25 +61,42 @@ async def signup(payload: SignupRequest):
     if len(payload.password) < 6:
         raise HTTPException(status_code=400, detail="Password must be at least 6 characters")
 
-    users = _users_collection()
-
-    # Check if email already exists
-    existing = await users.find_one({"email": email})
-    if existing:
+    # Check in-memory first
+    if email in _mem_users:
         raise HTTPException(status_code=409, detail="An account with this email already exists")
+
+    # Check MongoDB if available
+    try:
+        users = _users_collection()
+        existing = await users.find_one({"email": email})
+        if existing:
+            raise HTTPException(status_code=409, detail="An account with this email already exists")
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("MongoDB unavailable during signup email check: %s", exc)
 
     user_id = str(uuid.uuid4())
     display_name = payload.display_name.strip() or email.split("@")[0]
     password_hash = _hash_password(payload.password)
-
-    await users.insert_one({
+    user_doc = {
         "_id": user_id,
         "email": email,
         "password_hash": password_hash,
         "display_name": display_name,
         "is_guest": False,
         "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
+
+    # Store in memory
+    _mem_users[email] = user_doc
+
+    # Store in MongoDB (best-effort)
+    try:
+        users = _users_collection()
+        await users.insert_one(user_doc)
+    except Exception as exc:
+        logger.warning("MongoDB unavailable during signup insert, user saved in-memory: %s", exc)
 
     logger.info("New user registered: %s (%s)", display_name, email)
     return AuthResponse(
@@ -87,9 +111,22 @@ async def signup(payload: SignupRequest):
 async def signin(payload: SigninRequest):
     """Sign in an existing user with email and password."""
     email = payload.email.strip().lower()
-    users = _users_collection()
 
-    user = await users.find_one({"email": email})
+    user = None
+    # 1. Try MongoDB
+    try:
+        users = _users_collection()
+        user = await users.find_one({"email": email})
+        if user:
+            # Sync to in-memory
+            _mem_users[email] = user
+    except Exception as exc:
+        logger.warning("MongoDB unavailable during signin, checking in-memory store: %s", exc)
+
+    # 2. Fall back to in-memory store
+    if not user:
+        user = _mem_users.get(email)
+
     if not user:
         raise HTTPException(status_code=401, detail="Invalid email or password")
 
@@ -98,8 +135,8 @@ async def signin(payload: SigninRequest):
 
     logger.info("User signed in: %s", email)
     return AuthResponse(
-        user_id=user["_id"],
-        email=user["email"],
+        user_id=str(user.get("_id", uuid.uuid4())),
+        email=user.get("email"),
         display_name=user.get("display_name", email.split("@")[0]),
         is_guest=False,
     )
@@ -111,18 +148,28 @@ async def guest_login():
     user_id = str(uuid.uuid4())
     guest_number = random.randint(1000, 9999)
     display_name = f"Guest-{guest_number}"
-
-    users = _users_collection()
-    await users.insert_one({
+    user_doc = {
         "_id": user_id,
         "email": None,
         "password_hash": None,
         "display_name": display_name,
         "is_guest": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
-    })
+    }
 
-    logger.info("Guest session created: %s", display_name)
+    _mem_users[user_id] = user_doc
+
+    try:
+        users = _users_collection()
+        await users.insert_one(user_doc)
+        logger.info("Guest session created in DB: %s", display_name)
+    except Exception as exc:
+        # MongoDB may be unreachable — still allow guest login (in-memory only)
+        logger.warning(
+            "MongoDB unavailable during guest login, proceeding with in-memory session: %s",
+            exc,
+        )
+
     return AuthResponse(
         user_id=user_id,
         email=None,

@@ -48,13 +48,6 @@ def _load_faiss() -> Any:
 
 faiss = _load_faiss()
 
-try:
-    _sentence_transformers = importlib.import_module("sentence_transformers")
-    SentenceTransformer = getattr(_sentence_transformers, "SentenceTransformer")
-except (ImportError, AttributeError):
-    SentenceTransformer = None  # type: ignore[assignment]
-
-
 EmbedMode = Literal["document", "query"]
 
 

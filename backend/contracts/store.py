@@ -25,7 +25,9 @@ class MongoContractStore:
             from motor.motor_asyncio import AsyncIOMotorClient
             self._client = AsyncIOMotorClient(
                 self.uri,
-                serverSelectionTimeoutMS=5000,  # Fail fast on serverless (Vercel)
+                serverSelectionTimeoutMS=10000,
+                connectTimeoutMS=10000,
+                socketTimeoutMS=20000,
             )
             self._db = self._client[self.db_name]
         return self._db
