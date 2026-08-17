@@ -74,7 +74,7 @@ class Settings:
         1,
         _to_int(os.getenv("UPLOAD_MAX_BYTES"), default=5_242_880),
     )
-    ocr_enabled: bool = _to_bool(os.getenv("OCR_ENABLED"), default=False)
+    ocr_enabled: bool = _to_bool(os.getenv("OCR_ENABLED"), default=True)
     ollama_base_url: str = _normalize_url(
         os.getenv("OLLAMA_BASE_URL"),
         default="http://127.0.0.1:11434",
