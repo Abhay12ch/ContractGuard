@@ -15,17 +15,30 @@ from ..core.exceptions import (
 
 
 _BASE_ALLOWED_CONTENT_TYPES_BY_EXTENSION = {
-    ".pdf": {"application/pdf"},
+    ".pdf": {
+        "application/pdf",
+        "application/x-pdf",
+        "application/acrobat",
+        "applications/vnd.pdf",
+        "text/pdf",
+        "application/octet-stream",
+        "binary/octet-stream",
+        "",
+    },
     ".docx": {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "application/msword",
+        "application/octet-stream",
+        "binary/octet-stream",
+        "",
     },
 }
 
 _IMAGE_CONTENT_TYPES_BY_EXTENSION = {
-    ".png": {"image/png"},
-    ".jpg": {"image/jpeg"},
-    ".jpeg": {"image/jpeg"},
-    ".webp": {"image/webp"},
+    ".png": {"image/png", "application/octet-stream", ""},
+    ".jpg": {"image/jpeg", "image/pjpeg", "application/octet-stream", ""},
+    ".jpeg": {"image/jpeg", "image/pjpeg", "application/octet-stream", ""},
+    ".webp": {"image/webp", "application/octet-stream", ""},
 }
 
 
@@ -36,7 +49,7 @@ def _normalize_content_type(content_type: str | None) -> str:
 
 
 def _looks_like_pdf(contents: bytes) -> bool:
-    return contents.startswith(b"%PDF-")
+    return b"%PDF-" in contents[:1024]
 
 
 def _looks_like_docx(contents: bytes) -> bool:
@@ -53,25 +66,23 @@ def _looks_like_docx(contents: bytes) -> bool:
 
 
 def _looks_like_png(contents: bytes) -> bool:
-    return contents.startswith(b"\x89PNG\r\n\x1a\n")
+    return b"\x89PNG\r\n\x1a\n" in contents[:128] or contents.startswith(b"\x89PNG")
 
 
 def _looks_like_jpeg(contents: bytes) -> bool:
-    return contents.startswith(b"\xff\xd8\xff")
+    return contents.startswith(b"\xff\xd8")
 
 
 def _looks_like_webp(contents: bytes) -> bool:
     return (
         len(contents) >= 12
-        and contents.startswith(b"RIFF")
-        and contents[8:12] == b"WEBP"
+        and b"RIFF" in contents[:16]
+        and b"WEBP" in contents[:16]
     )
 
 
-def _supported_format_names(*, allow_images: bool) -> tuple[str, ...]:
-    if allow_images:
-        return ("PDF", "DOCX", "PNG", "JPG/JPEG", "WEBP")
-    return ("PDF", "DOCX")
+def _supported_format_names(*, allow_images: bool = True) -> tuple[str, ...]:
+    return ("PDF", "DOCX", "PNG", "JPG/JPEG", "WEBP")
 
 
 def validate_upload_payload(

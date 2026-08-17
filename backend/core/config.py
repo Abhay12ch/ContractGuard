@@ -72,7 +72,7 @@ class Settings:
     )
     upload_max_bytes: int = max(
         1,
-        _to_int(os.getenv("UPLOAD_MAX_BYTES"), default=5_242_880),
+        _to_int(os.getenv("UPLOAD_MAX_BYTES"), default=26_214_400),
     )
     ocr_enabled: bool = _to_bool(os.getenv("OCR_ENABLED"), default=True)
     ollama_base_url: str = _normalize_url(

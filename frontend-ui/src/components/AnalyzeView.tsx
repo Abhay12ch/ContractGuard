@@ -849,7 +849,11 @@ export const AnalyzeView = () => {
           <span className="material-symbols-outlined text-red-400 text-lg">error</span>
           <div>
             <p className="text-sm font-bold text-red-400">Upload Failed</p>
-            <p className="text-xs text-red-400/60 mt-0.5">{(uploadMutation.error || ingestMutation.error)?.message || 'Please try again.'}</p>
+            <p className="text-xs text-red-400/80 mt-0.5">
+              {((uploadMutation.error || ingestMutation.error) as any)?.response?.data?.detail ||
+                (uploadMutation.error || ingestMutation.error)?.message ||
+                'Please try again.'}
+            </p>
           </div>
         </div>
       )}
