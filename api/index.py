@@ -14,6 +14,8 @@ _project_root = str(Path(__file__).resolve().parent.parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
+from backend.main import app as _original_app  # noqa: E402
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 

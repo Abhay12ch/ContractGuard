@@ -13,64 +13,125 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 import logging
+import sys
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any, Dict
+
+# Ensure project root is in sys.path so 'backend.*' imports always resolve
+_backend_dir = Path(__file__).resolve().parent
+_project_root = _backend_dir.parent
+if str(_project_root) not in sys.path:
+    sys.path.insert(0, str(_project_root))
+if str(_backend_dir) not in sys.path:
+    sys.path.insert(0, str(_backend_dir))
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
 
-from .api.errors import to_http_exception
-from .api.schemas import (
-    ContractListItem,
-    ContractListResponse,
-    ContractStatusResponse,
-    CompareRequest,
-    CompareResponse,
-    IngestTextRequest,
-    MetadataRequest,
-    MetadataResponse,
-    QARequest,
-    QAResponse,
-    RisksRequest,
-    RisksResponse,
-    SummaryRequest,
-    SummaryResponse,
-    UploadResponse,
-    VendorVerifyRequest,
-    VendorVerifyResponse,
-    ZohoSignatureRequest,
-    ZohoSignatureResponse,
-    ZohoAuditTrailResponse,
-)
-from .contracts.analyzer import analyze_contract
-from .contracts.chat_engine import generate_answer as chat_generate_answer, is_available as chat_engine_available
-from .contracts.comparator import compare_contracts
-from .contracts.embedder import retrieve_relevant_chunks, warmup_embedder
-from .contracts.metadata_extractor import extract_contract_metadata
-from .contracts.parser import extract_text_from_file
-from .contracts.qa_chain import answer_question
-from .contracts.services import ContractService
-from .contracts.session_manager import generate_session_id
-from .contracts.summarizer import summarize_contract
-from .contracts.vendor_verifier import verify_vendor
-from .contracts.zoho_sign import zoho_configured, verify_signature as zoho_verify_signature, get_audit_trail as zoho_get_audit_trail
+if __package__ is None or __package__ == "":
+    from api.errors import to_http_exception
+    from api.schemas import (
+        ContractListItem,
+        ContractListResponse,
+        ContractStatusResponse,
+        CompareRequest,
+        CompareResponse,
+        IngestTextRequest,
+        MetadataRequest,
+        MetadataResponse,
+        QARequest,
+        QAResponse,
+        RisksRequest,
+        RisksResponse,
+        SummaryRequest,
+        SummaryResponse,
+        UploadResponse,
+        VendorVerifyRequest,
+        VendorVerifyResponse,
+        ZohoSignatureRequest,
+        ZohoSignatureResponse,
+        ZohoAuditTrailResponse,
+    )
+    from contracts.analyzer import analyze_contract
+    from contracts.chat_engine import generate_answer as chat_generate_answer, is_available as chat_engine_available
+    from contracts.comparator import compare_contracts
+    from contracts.embedder import retrieve_relevant_chunks, warmup_embedder
+    from contracts.metadata_extractor import extract_contract_metadata
+    from contracts.parser import extract_text_from_file
+    from contracts.qa_chain import answer_question
+    from contracts.services import ContractService
+    from contracts.session_manager import generate_session_id
+    from contracts.summarizer import summarize_contract
+    from contracts.vendor_verifier import verify_vendor
+    from contracts.zoho_sign import zoho_configured, verify_signature as zoho_verify_signature, get_audit_trail as zoho_get_audit_trail
 
-from .auth import router as auth_router
-from .contracts.store import MongoContractStore
-from .core.config import settings
-from .core.exceptions import (
-    ContractGuardError,
-    ContractNotFoundError,
-    ContractStorageError,
-    EmptyContractTextError,
-    IndexingFailedError,
-    IndexingInProgressError,
-)
-from .core.logging_config import configure_logging
-from .ingestion.queue import IndexingJobQueue
-from .ingestion.upload_validation import validate_upload_payload
+    from auth import router as auth_router
+    from contracts.store import MongoContractStore
+    from core.config import settings
+    from core.exceptions import (
+        ContractGuardError,
+        ContractNotFoundError,
+        ContractStorageError,
+        EmptyContractTextError,
+        IndexingFailedError,
+        IndexingInProgressError,
+    )
+    from core.logging_config import configure_logging
+    from ingestion.queue import IndexingJobQueue
+    from ingestion.upload_validation import validate_upload_payload
+else:
+    from .api.errors import to_http_exception
+    from .api.schemas import (
+        ContractListItem,
+        ContractListResponse,
+        ContractStatusResponse,
+        CompareRequest,
+        CompareResponse,
+        IngestTextRequest,
+        MetadataRequest,
+        MetadataResponse,
+        QARequest,
+        QAResponse,
+        RisksRequest,
+        RisksResponse,
+        SummaryRequest,
+        SummaryResponse,
+        UploadResponse,
+        VendorVerifyRequest,
+        VendorVerifyResponse,
+        ZohoSignatureRequest,
+        ZohoSignatureResponse,
+        ZohoAuditTrailResponse,
+    )
+    from .contracts.analyzer import analyze_contract
+    from .contracts.chat_engine import generate_answer as chat_generate_answer, is_available as chat_engine_available
+    from .contracts.comparator import compare_contracts
+    from .contracts.embedder import retrieve_relevant_chunks, warmup_embedder
+    from .contracts.metadata_extractor import extract_contract_metadata
+    from .contracts.parser import extract_text_from_file
+    from .contracts.qa_chain import answer_question
+    from .contracts.services import ContractService
+    from .contracts.session_manager import generate_session_id
+    from .contracts.summarizer import summarize_contract
+    from .contracts.vendor_verifier import verify_vendor
+    from .contracts.zoho_sign import zoho_configured, verify_signature as zoho_verify_signature, get_audit_trail as zoho_get_audit_trail
+
+    from .auth import router as auth_router
+    from .contracts.store import MongoContractStore
+    from .core.config import settings
+    from .core.exceptions import (
+        ContractGuardError,
+        ContractNotFoundError,
+        ContractStorageError,
+        EmptyContractTextError,
+        IndexingFailedError,
+        IndexingInProgressError,
+    )
+    from .core.logging_config import configure_logging
+    from .ingestion.queue import IndexingJobQueue
+    from .ingestion.upload_validation import validate_upload_payload
 
 
 configure_logging(settings)
@@ -115,9 +176,11 @@ async def _lifespan(_app: FastAPI):
     # Verify MongoDB connection
     try:
         await store.db.command("ping")
+        store.is_available = True
         logger.info("Connected to MongoDB Atlas successfully.")
     except Exception as exc:
-        logger.error("Failed to connect to MongoDB: %s", exc)
+        store.is_available = False
+        logger.warning("MongoDB unavailable at startup (%s), using in-memory mode.", exc)
 
     if settings.prewarm_embedder_on_startup:
         try:
@@ -332,6 +395,7 @@ async def upload_contract(file: Annotated[UploadFile, File(...)]) -> UploadRespo
         _cache_set(fallback_id, "text", text)
         _cache_set(fallback_id, "filename", file.filename)
         _cache_set(fallback_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+        contract_service.set_memory_text(fallback_id, text)
 
         from .contracts.embedder import chunk_contract_text
         chunks = chunk_contract_text(text)
@@ -379,6 +443,7 @@ async def ingest_text(payload: IngestTextRequest) -> UploadResponse:
         _cache_set(fallback_id, "text", raw_text)
         _cache_set(fallback_id, "filename", filename)
         _cache_set(fallback_id, "uploaded_at", datetime.now(timezone.utc).isoformat())
+        contract_service.set_memory_text(fallback_id, raw_text)
 
         from .contracts.embedder import chunk_contract_text
         chunks = chunk_contract_text(raw_text)

@@ -14,9 +14,14 @@ from datetime import datetime, timezone
 import bcrypt
 from fastapi import APIRouter, HTTPException
 
-from .api.schemas import AuthResponse, SigninRequest, SignupRequest
-from .contracts.store import MongoContractStore
-from .core.config import settings
+if __package__ is None or __package__ == "":
+    from api.schemas import AuthResponse, SigninRequest, SignupRequest
+    from contracts.store import MongoContractStore
+    from core.config import settings
+else:
+    from .api.schemas import AuthResponse, SigninRequest, SignupRequest
+    from .contracts.store import MongoContractStore
+    from .core.config import settings
 
 logger = logging.getLogger("contractguard.auth")
 
@@ -66,15 +71,18 @@ async def signup(payload: SignupRequest):
         raise HTTPException(status_code=409, detail="An account with this email already exists")
 
     # Check MongoDB if available
-    try:
-        users = _users_collection()
-        existing = await users.find_one({"email": email})
-        if existing:
-            raise HTTPException(status_code=409, detail="An account with this email already exists")
-    except HTTPException:
-        raise
-    except Exception as exc:
-        logger.warning("MongoDB unavailable during signup email check: %s", exc)
+    store = _get_store()
+    if store.is_available:
+        try:
+            users = _users_collection()
+            existing = await users.find_one({"email": email})
+            if existing:
+                raise HTTPException(status_code=409, detail="An account with this email already exists")
+        except HTTPException:
+            raise
+        except Exception as exc:
+            logger.warning("MongoDB unavailable during signup email check: %s", exc)
+            store.is_available = False
 
     user_id = str(uuid.uuid4())
     display_name = payload.display_name.strip() or email.split("@")[0]
@@ -92,11 +100,13 @@ async def signup(payload: SignupRequest):
     _mem_users[email] = user_doc
 
     # Store in MongoDB (best-effort)
-    try:
-        users = _users_collection()
-        await users.insert_one(user_doc)
-    except Exception as exc:
-        logger.warning("MongoDB unavailable during signup insert, user saved in-memory: %s", exc)
+    if store.is_available:
+        try:
+            users = _users_collection()
+            await users.insert_one(user_doc)
+        except Exception as exc:
+            logger.warning("MongoDB unavailable during signup insert, user saved in-memory: %s", exc)
+            store.is_available = False
 
     logger.info("New user registered: %s (%s)", display_name, email)
     return AuthResponse(
@@ -111,17 +121,20 @@ async def signup(payload: SignupRequest):
 async def signin(payload: SigninRequest):
     """Sign in an existing user with email and password."""
     email = payload.email.strip().lower()
+    store = _get_store()
 
     user = None
-    # 1. Try MongoDB
-    try:
-        users = _users_collection()
-        user = await users.find_one({"email": email})
-        if user:
-            # Sync to in-memory
-            _mem_users[email] = user
-    except Exception as exc:
-        logger.warning("MongoDB unavailable during signin, checking in-memory store: %s", exc)
+    # 1. Try MongoDB if available
+    if store.is_available:
+        try:
+            users = _users_collection()
+            user = await users.find_one({"email": email})
+            if user:
+                # Sync to in-memory
+                _mem_users[email] = user
+        except Exception as exc:
+            logger.warning("MongoDB unavailable during signin, checking in-memory store: %s", exc)
+            store.is_available = False
 
     # 2. Fall back to in-memory store
     if not user:
@@ -158,17 +171,19 @@ async def guest_login():
     }
 
     _mem_users[user_id] = user_doc
+    store = _get_store()
 
-    try:
-        users = _users_collection()
-        await users.insert_one(user_doc)
-        logger.info("Guest session created in DB: %s", display_name)
-    except Exception as exc:
-        # MongoDB may be unreachable — still allow guest login (in-memory only)
-        logger.warning(
-            "MongoDB unavailable during guest login, proceeding with in-memory session: %s",
-            exc,
-        )
+    if store.is_available:
+        try:
+            users = _users_collection()
+            await users.insert_one(user_doc)
+            logger.info("Guest session created in DB: %s", display_name)
+        except Exception as exc:
+            logger.warning(
+                "MongoDB unavailable during guest login, proceeding with in-memory session: %s",
+                exc,
+            )
+            store.is_available = False
 
     return AuthResponse(
         user_id=user_id,

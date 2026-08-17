@@ -49,7 +49,7 @@ def get_gemini_client() -> Any:
 
 
 def default_model() -> str:
-    return os.getenv("GEMINI_MODEL", "gemini-2.5-pro").strip() or "gemini-2.5-pro"
+    return os.getenv("GEMINI_MODEL", "gemini-3.5-flash").strip() or "gemini-3.5-flash"
 
 
 def generate_text(prompt: str, *, model: str | None = None) -> str:

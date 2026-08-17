@@ -20,6 +20,11 @@ import warnings
 
 import numpy as np
 
+try:
+    from sentence_transformers import SentenceTransformer
+except ImportError:
+    SentenceTransformer = None  # type: ignore[misc, assignment]
+
 logger = logging.getLogger("contractguard.embedder")
 
 def _load_faiss() -> Any:

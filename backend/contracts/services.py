@@ -17,7 +17,7 @@ logger = logging.getLogger("contractguard.services")
 
 
 class ContractService:
-    """Service-layer orchestration for contract text/chunk/vector management via MongoDB."""
+    """Service-layer orchestration for contract text/chunk/vector management via MongoDB & in-memory cache."""
 
     def __init__(
         self,
@@ -27,6 +27,11 @@ class ContractService:
     ) -> None:
         self.store = store
         self.precompute_embeddings_on_upload = precompute_embeddings_on_upload
+        self._mem_text: dict[str, str] = {}
+
+    def set_memory_text(self, contract_id: str, text: str) -> None:
+        """Explicitly register contract text in the in-memory fallback cache."""
+        self._mem_text[contract_id] = text
 
     async def store_contract_and_index(self, text: str, filename: str) -> UploadResponse:
         return await self._store_contract(
@@ -55,6 +60,7 @@ class ContractService:
         start = time.perf_counter()
 
         contract_id = str(uuid.uuid4())
+        self._mem_text[contract_id] = text
         
         # Save textual component first
         await self.store.save_contract(contract_id=contract_id, title=filename, text=text)
@@ -63,16 +69,12 @@ class ContractService:
 
         embedding_count = 0
         if precompute_embeddings:
-            # We must compute embeddings to save to mongo
-            # Right now build_faiss_store doesn't return the raw embeddings
-            # We'll just build the store lazily. Let's offload FAISS init.
             vector_store = contract_embedder.build_faiss_store(chunks)
             embedding_count = int(vector_store.get("embedding_count", 0))
-            # Here we might ideally save the chunks into Mongo 
             await self.store.save_contract_chunks_and_embeddings(
                 contract_id, 
                 chunks, 
-                [], # Empty list for now, we'll reconstruct dynamically if not saved
+                [],
                 vector_store["dimension"]
             )
         else:
@@ -98,7 +100,12 @@ class ContractService:
         )
 
     async def get_contract_text(self, contract_id: str) -> str | None:
-        return await self.store.get_text(contract_id)
+        if contract_id in self._mem_text:
+            return self._mem_text[contract_id]
+        text = await self.store.get_text(contract_id)
+        if text:
+            self._mem_text[contract_id] = text
+        return text
 
     async def require_contract_text(self, contract_id: str) -> str:
         text = await self.get_contract_text(contract_id)
@@ -109,25 +116,24 @@ class ContractService:
     async def get_or_build_vector_store(self, contract_id: str) -> dict:
         """Hydrates FAISS vector index from Mongo or rebuilds if missing."""
         doc = await self.store.get_contract_data(contract_id)
-        if not doc:
-            raise ContractNotFoundError(contract_id)
-            
-        chunks = doc.get("chunks")
+        chunks = doc.get("chunks") if doc else None
+        
         if not chunks:
-            text = doc.get("text", "")
+            text = (doc.get("text") if doc else None) or self._mem_text.get(contract_id)
+            if not text:
+                text = await self.get_contract_text(contract_id)
+            if not text:
+                raise ContractNotFoundError(contract_id)
             chunks = contract_embedder.chunk_contract_text(text)
-            await self.store.save_contract_chunks_and_embeddings(contract_id, chunks, [], 0)
+            if doc and self.store.is_available:
+                await self.store.save_contract_chunks_and_embeddings(contract_id, chunks, [], 0)
 
         start = time.perf_counter()
-        
-        # In a fully robust scenario, we would store and retrieve embeddings directly.
-        # For simplicity without breaking the FAISS abstraction in embedder.py,
-        # we'll build it using the chunks.
         built_store = contract_embedder.build_faiss_store(chunks)
 
         elapsed_ms = int((time.perf_counter() - start) * 1000)
         logger.info(
-            "Built vector store lazily for %s in %d ms (chunks=%d)",
+            "Built vector store for %s in %d ms (chunks=%d)",
             contract_id,
             elapsed_ms,
             len(chunks),

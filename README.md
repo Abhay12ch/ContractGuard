@@ -169,7 +169,7 @@ MONGO_URI=mongodb+srv://user:pass@cluster.mongodb.net/
 MONGO_DB_NAME=contractguard
 
 # Optional – AI model selection
-GEMINI_MODEL=gemini-2.5-pro
+GEMINI_MODEL=gemini-3.5-flash
 
 # Optional – Zoho Sign integration
 ZOHO_CLIENT_ID=your_zoho_client_id

@@ -1,4 +1,6 @@
 fastapi
+uvicorn
+pydantic
 pypdf
 python-docx
 python-multipart
