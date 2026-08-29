@@ -167,6 +167,12 @@ def _init_state() -> None:
         st.session_state.contracts_search = ""
     if "analytics_view_tab" not in st.session_state:
         st.session_state.analytics_view_tab = "Overview"
+    if "analysis_in_progress" not in st.session_state:
+        st.session_state.analysis_in_progress = False
+    if "last_analyzed_file" not in st.session_state:
+        st.session_state.last_analyzed_file = ""
+    if "last_analyzed_text_hash" not in st.session_state:
+        st.session_state.last_analyzed_text_hash = ""
 
 
 def _format_size(size_bytes: int) -> str:
@@ -2485,134 +2491,171 @@ if process_file_clicked:
     if uploaded_file is None:
         st.warning("Please upload a contract file first.")
     else:
-        with st.spinner("Uploading and analyzing contract..."):
-            try:
-                file_bytes = uploaded_file.getvalue()
-                file_size = int(getattr(uploaded_file, "size", len(file_bytes)))
-                files = {
-                    "file": (
-                        uploaded_file.name,
-                        file_bytes,
-                        uploaded_file.type or "application/octet-stream",
-                    )
-                }
-                upload_resp = _api_post("/upload", files=files)
-                upload_resp.raise_for_status()
-                upload_json = upload_resp.json()
+        # Dedup guard: skip re-analysis if same file was already analyzed
+        file_fingerprint = f"{uploaded_file.name}_{getattr(uploaded_file, 'size', 0)}"
+        already_analyzed = (
+            st.session_state.last_analyzed_file == file_fingerprint
+            and st.session_state.risk_data is not None
+            and st.session_state.summary_data is not None
+        )
+        if already_analyzed:
+            st.info("This file has already been analyzed. Results are shown below.")
+        else:
+            st.session_state.analysis_in_progress = True
+            with st.spinner("Uploading and analyzing contract..."):
+                try:
+                    file_bytes = uploaded_file.getvalue()
+                    file_size = int(getattr(uploaded_file, "size", len(file_bytes)))
+                    files = {
+                        "file": (
+                            uploaded_file.name,
+                            file_bytes,
+                            uploaded_file.type or "application/octet-stream",
+                        )
+                    }
+                    upload_resp = _api_post("/upload", files=files)
+                    upload_resp.raise_for_status()
+                    upload_json = upload_resp.json()
 
-                contract_id = upload_json["contract_id"]
-                filename = upload_json.get("filename", uploaded_file.name)
-                st.session_state.contract_id = contract_id
-                st.session_state.upload_name = filename
-                _remember_contract(contract_id, filename)
-                _queue_upload_item(
-                    filename=filename,
-                    contract_id=contract_id,
-                    size_bytes=file_size,
-                    status=str(upload_json.get("status", "processing")),
-                )
-
-                risks_resp = _api_post("/risks", json={"contract_id": contract_id})
-                risks_resp.raise_for_status()
-                st.session_state.risk_data = risks_resp.json()
-
-                summary_resp = _api_post("/summary", json={"contract_id": contract_id, "max_chars": 900})
-                summary_resp.raise_for_status()
-                st.session_state.summary_data = summary_resp.json()
-                _cache_analysis(
-                    contract_id,
-                    st.session_state.risk_data,
-                    st.session_state.summary_data,
-                )
-                status_payload = _update_queue_status_from_backend(contract_id, filename, file_size)
-                status_value = _status_value(status_payload) or str(upload_json.get("status", "")).strip().lower()
-                if status_value == "failed":
-                    error_detail = ""
-                    if status_payload:
-                        error_detail = str(status_payload.get("error", "")).strip()
-                    st.error(
-                        "Analysis generated summary/risk outputs, but indexing failed. "
-                        + (f"Details: {error_detail}" if error_detail else "")
+                    contract_id = upload_json["contract_id"]
+                    filename = upload_json.get("filename", uploaded_file.name)
+                    st.session_state.contract_id = contract_id
+                    st.session_state.upload_name = filename
+                    _remember_contract(contract_id, filename)
+                    _queue_upload_item(
+                        filename=filename,
+                        contract_id=contract_id,
+                        size_bytes=file_size,
+                        status=str(upload_json.get("status", "processing")),
                     )
-                elif status_value == "processing":
-                    st.info(
-                        "Analysis is available. Contract indexing is still processing, "
-                        "so Q&A may take a moment to become ready."
+
+                    risks_resp = _api_post("/risks", json={"contract_id": contract_id})
+                    risks_resp.raise_for_status()
+                    st.session_state.risk_data = risks_resp.json()
+
+                    summary_resp = _api_post("/summary", json={"contract_id": contract_id, "max_chars": 900})
+                    summary_resp.raise_for_status()
+                    st.session_state.summary_data = summary_resp.json()
+                    _cache_analysis(
+                        contract_id,
+                        st.session_state.risk_data,
+                        st.session_state.summary_data,
                     )
-                else:
-                    st.success("Analysis complete.")
-            except (requests.RequestException, RuntimeError) as exc:
-                _queue_upload_item(
-                    filename=getattr(uploaded_file, "name", "Uploaded File"),
-                    contract_id="N/A",
-                    size_bytes=int(getattr(uploaded_file, "size", 0)),
-                    status="Failed",
-                )
-                st.error(f"API error: {exc}")
+                    status_payload = _update_queue_status_from_backend(contract_id, filename, file_size)
+                    status_value = _status_value(status_payload) or str(upload_json.get("status", "")).strip().lower()
+
+                    # Mark analysis complete and store fingerprint to prevent re-analysis
+                    st.session_state.last_analyzed_file = file_fingerprint
+                    st.session_state.analysis_in_progress = False
+
+                    if status_value == "failed":
+                        error_detail = ""
+                        if status_payload:
+                            error_detail = str(status_payload.get("error", "")).strip()
+                        st.error(
+                            "Analysis generated summary/risk outputs, but indexing failed. "
+                            + (f"Details: {error_detail}" if error_detail else "")
+                        )
+                    elif status_value == "processing":
+                        st.info(
+                            "Analysis is available. Contract indexing is still processing, "
+                            "so Q&A may take a moment to become ready."
+                        )
+
+                    # Rerun so the results section renders cleanly below
+                    st.rerun()
+                except (requests.RequestException, RuntimeError) as exc:
+                    st.session_state.analysis_in_progress = False
+                    _queue_upload_item(
+                        filename=getattr(uploaded_file, "name", "Uploaded File"),
+                        contract_id="N/A",
+                        size_bytes=int(getattr(uploaded_file, "size", 0)),
+                        status="Failed",
+                    )
+                    st.error(f"API error: {exc}")
 
 if process_text_clicked:
     if not manual_text.strip():
         st.warning("Please paste contract text first.")
     else:
-        with st.spinner("Analyzing pasted text..."):
-            try:
-                ingest_resp = _api_post(
-                    "/ingest-text",
-                    json={"text": manual_text, "title": manual_title},
-                )
-                ingest_resp.raise_for_status()
-                ingest_json = ingest_resp.json()
-
-                contract_id = ingest_json["contract_id"]
-                filename = ingest_json.get("filename", "Pasted Contract Text")
-                text_size = len(manual_text.encode("utf-8"))
-                st.session_state.contract_id = contract_id
-                st.session_state.upload_name = filename
-                _remember_contract(contract_id, filename)
-                _queue_upload_item(
-                    filename=filename,
-                    contract_id=contract_id,
-                    size_bytes=text_size,
-                    status=str(ingest_json.get("status", "processing")),
-                )
-
-                risks_resp = _api_post("/risks", json={"contract_id": contract_id})
-                risks_resp.raise_for_status()
-                st.session_state.risk_data = risks_resp.json()
-
-                summary_resp = _api_post("/summary", json={"contract_id": contract_id, "max_chars": 900})
-                summary_resp.raise_for_status()
-                st.session_state.summary_data = summary_resp.json()
-                _cache_analysis(
-                    contract_id,
-                    st.session_state.risk_data,
-                    st.session_state.summary_data,
-                )
-                status_payload = _update_queue_status_from_backend(contract_id, filename, text_size)
-                status_value = _status_value(status_payload) or str(ingest_json.get("status", "")).strip().lower()
-                if status_value == "failed":
-                    error_detail = ""
-                    if status_payload:
-                        error_detail = str(status_payload.get("error", "")).strip()
-                    st.error(
-                        "Text analysis generated outputs, but indexing failed. "
-                        + (f"Details: {error_detail}" if error_detail else "")
+        # Dedup guard: skip re-analysis if same text was already analyzed
+        import hashlib as _hashlib
+        text_hash = _hashlib.md5(manual_text.encode("utf-8")).hexdigest()
+        already_analyzed = (
+            st.session_state.last_analyzed_text_hash == text_hash
+            and st.session_state.risk_data is not None
+            and st.session_state.summary_data is not None
+        )
+        if already_analyzed:
+            st.info("This text has already been analyzed. Results are shown below.")
+        else:
+            st.session_state.analysis_in_progress = True
+            with st.spinner("Analyzing pasted text..."):
+                try:
+                    ingest_resp = _api_post(
+                        "/ingest-text",
+                        json={"text": manual_text, "title": manual_title},
                     )
-                elif status_value == "processing":
-                    st.info(
-                        "Text analysis is available. Contract indexing is still processing, "
-                        "so Q&A may take a moment to become ready."
+                    ingest_resp.raise_for_status()
+                    ingest_json = ingest_resp.json()
+
+                    contract_id = ingest_json["contract_id"]
+                    filename = ingest_json.get("filename", "Pasted Contract Text")
+                    text_size = len(manual_text.encode("utf-8"))
+                    st.session_state.contract_id = contract_id
+                    st.session_state.upload_name = filename
+                    _remember_contract(contract_id, filename)
+                    _queue_upload_item(
+                        filename=filename,
+                        contract_id=contract_id,
+                        size_bytes=text_size,
+                        status=str(ingest_json.get("status", "processing")),
                     )
-                else:
-                    st.success("Text analysis complete.")
-            except (requests.RequestException, RuntimeError) as exc:
-                _queue_upload_item(
-                    filename=manual_title or "Pasted Contract Text",
-                    contract_id="N/A",
-                    size_bytes=len(manual_text.encode("utf-8")),
-                    status="Failed",
-                )
-                st.error(f"API error: {exc}")
+
+                    risks_resp = _api_post("/risks", json={"contract_id": contract_id})
+                    risks_resp.raise_for_status()
+                    st.session_state.risk_data = risks_resp.json()
+
+                    summary_resp = _api_post("/summary", json={"contract_id": contract_id, "max_chars": 900})
+                    summary_resp.raise_for_status()
+                    st.session_state.summary_data = summary_resp.json()
+                    _cache_analysis(
+                        contract_id,
+                        st.session_state.risk_data,
+                        st.session_state.summary_data,
+                    )
+                    status_payload = _update_queue_status_from_backend(contract_id, filename, text_size)
+                    status_value = _status_value(status_payload) or str(ingest_json.get("status", "")).strip().lower()
+
+                    # Mark analysis complete and store hash to prevent re-analysis
+                    st.session_state.last_analyzed_text_hash = text_hash
+                    st.session_state.analysis_in_progress = False
+
+                    if status_value == "failed":
+                        error_detail = ""
+                        if status_payload:
+                            error_detail = str(status_payload.get("error", "")).strip()
+                        st.error(
+                            "Text analysis generated outputs, but indexing failed. "
+                            + (f"Details: {error_detail}" if error_detail else "")
+                        )
+                    elif status_value == "processing":
+                        st.info(
+                            "Text analysis is available. Contract indexing is still processing, "
+                            "so Q&A may take a moment to become ready."
+                        )
+
+                    # Rerun so the results section renders cleanly below
+                    st.rerun()
+                except (requests.RequestException, RuntimeError) as exc:
+                    st.session_state.analysis_in_progress = False
+                    _queue_upload_item(
+                        filename=manual_title or "Pasted Contract Text",
+                        contract_id="N/A",
+                        size_bytes=len(manual_text.encode("utf-8")),
+                        status="Failed",
+                    )
+                    st.error(f"API error: {exc}")
 
 queue_items = st.session_state.upload_queue
 st.markdown(
@@ -2665,6 +2708,7 @@ if st.session_state.contract_id:
     )
 
 if st.session_state.risk_data and st.session_state.summary_data:
+    st.success("✅ Analysis complete — results are displayed below.")
     ui_language = st.session_state.selected_language_code
     display_risk_data = _translated_risk_data(st.session_state.risk_data, ui_language)
     display_summary_text = _translate_for_ui(

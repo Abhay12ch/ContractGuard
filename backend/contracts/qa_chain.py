@@ -191,7 +191,7 @@ def _generate_with_gemini(question: str, retrieved_chunks: List[str]) -> str:
         )
         text = getattr(response, "text", "")
         return text.strip()
-    except (AttributeError, OSError, RuntimeError, TypeError, ValueError):
+    except Exception:
         return ""
 
 

@@ -91,12 +91,6 @@ class MongoContractStore:
         except Exception as exc:
             logger.warning("MongoDB delete_contract failed: %s", exc)
             self.is_available = False
-        await self.contracts.delete_one({"_id": contract_id})
-        await self.summaries.delete_one({"_id": contract_id})
-        await self.risks.delete_one({"_id": contract_id})
-        await self.chat_history.delete_many({"contract_id": contract_id})
-        await self.metadata.delete_one({"_id": contract_id})
-        await self.vendor_verifications.delete_one({"_id": contract_id})
 
     async def save_contract(self, contract_id: str, title: str, text: str) -> None:
         """Save basic contract text info without vector data."""
